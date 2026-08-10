@@ -8,7 +8,7 @@ import * as metals from "../controllers/metals.controller.js";
 import * as wallets from "../controllers/user.portfolio.controller.js";
 import { getPortfolioSummary, getPortfolioChart } from "../controllers/portfolio.btc.data.controller.js";
 import { getPortfolioSummary as getEthSummary, getPortfolioChart as getEthChart } from "../controllers/portfolio.eth.data.controller.js";
-import { getPolymarketBitcoin, getPolymarketEthereum, getPolymarketGold,  getPolymarketSilver} from '../controllers/polymarket.controller.js';
+import { getPolymarketBitcoin, getPolymarketEthereum, getPolymarketMonero, getPolymarketGold,  getPolymarketSilver} from '../controllers/polymarket.controller.js';
 
 const router = Router();
 
@@ -42,6 +42,7 @@ router.get("/crypto/chart", requireAuth, crypto.getChart);
 // ✅ Polymarket (auth-protected)
 router.get('/polymarket/bitcoin', requireAuth, getPolymarketBitcoin);
 router.get('/polymarket/ethereum', requireAuth, getPolymarketEthereum);
+router.get('/polymarket/monero', requireAuth, getPolymarketMonero);
 router.get('/polymarket/gold', requireAuth, getPolymarketGold);
 router.get('/polymarket/silver', requireAuth, getPolymarketSilver);
 
