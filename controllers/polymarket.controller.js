@@ -499,7 +499,7 @@ export async function getPolymarketGold(req, res) {
     );
 
     // 4) (optional) attach live best bid/ask from CLOB
-    let data = ethMarkets;
+    let data = goldMarkets;
     if (livePrices && goldMarkets.some((m) => m.clobTokenIds.length)) {
       const params = [];
       for (const m of goldMarkets) {
@@ -518,7 +518,7 @@ export async function getPolymarketGold(req, res) {
 
       if (clobRes.ok) {
         const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = ethMarkets.map((m) => {
+        data = goldMarkets.map((m) => {
           const live = {};
           for (const t of m.clobTokenIds) {
             const p = priceMap?.[t];
@@ -622,18 +622,17 @@ export async function getPolymarketSilver(req, res) {
       }
     }
 
-    // Heuristic: keep obvious BTC markets
-    const ethMarkets = markets.filter(
+    const silverMarkets = markets.filter(
       (m) =>
         /gold|xau/i.test(m.question ?? '') ||
         /gold|xau/i.test(m.marketSlug ?? '')
     );
 
     // 4) (optional) attach live best bid/ask from CLOB
-    let data = ethMarkets;
-    if (livePrices && ethMarkets.some((m) => m.clobTokenIds.length)) {
+    let data = silverMarkets;
+    if (livePrices && silverMarkets.some((m) => m.clobTokenIds.length)) {
       const params = [];
-      for (const m of ethMarkets) {
+      for (const m of silverMarkets) {
         for (const t of m.clobTokenIds) {
           params.push({ token_id: t, side: 'BUY' });  // best ask (what you pay)
           params.push({ token_id: t, side: 'SELL' }); // best bid (what you receive)
@@ -649,7 +648,7 @@ export async function getPolymarketSilver(req, res) {
 
       if (clobRes.ok) {
         const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = ethMarkets.map((m) => {
+        data = silverMarkets.map((m) => {
           const live = {};
           for (const t of m.clobTokenIds) {
             const p = priceMap?.[t];
