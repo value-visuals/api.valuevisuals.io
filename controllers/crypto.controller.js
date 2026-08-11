@@ -21,9 +21,11 @@ const normFiat = (s) => {
 
 // tiny in-memory cache (swap for Redis later without changing route shapes)
 const cache = new Map(); // key -> { data, exp }
+
 function setCache(key, data, ttlSec) {
   cache.set(key, { data, exp: Date.now() + ttlSec * 1000 });
 }
+
 function getCache(key) {
   const item = cache.get(key);
   if (!item) return null;
@@ -67,6 +69,11 @@ const IDMAP = {
       EUR: "ETH-EUR",
       GBP: "ETH-GBP",
     },
+  },
+  XMR: {
+    coincap: "monero",
+    paprika: "xmr-monero",
+    coinbase: null,
   },
 };
 
@@ -190,15 +197,62 @@ async function coincapCandles({ baseId, interval, startMs, endMs }) {
   const headers = process.env.COINCAP_API_KEY
     ? { Authorization: `Bearer ${process.env.COINCAP_API_KEY}` }
     : undefined;
-  const url = `${P.COINCAP}/candles?exchange=coinbase-pro&interval=${interval}&baseId=${baseId}&quoteId=usd&start=${startMs}&end=${endMs}`;
+
+  const url =
+    `${P.COINCAP}/candles` +
+    `?exchange=coinbase-pro` +
+    `&interval=${interval}` +
+    `&baseId=${baseId}` +
+    `&quoteId=usd` +
+    `&start=${startMs}` +
+    `&end=${endMs}`;
+
   const d = await httpGet(url, { headers }, 1);
-  return (d.data || []).map((c) => ({
-    t: c.period,
-    o: Number(c.open),
-    h: Number(c.high),
-    l: Number(c.low),
-    c: Number(c.close),
-  }));
+
+  const candles = (d.data || [])
+    .map((c) => {
+      let t = Number(c.period);
+
+      // CoinCap should return milliseconds, but normalize defensively.
+      if (Number.isFinite(t) && t < 10_000_000_000) {
+        t *= 1000;
+      }
+
+      return {
+        t,
+        o: Number(c.open),
+        h: Number(c.high),
+        l: Number(c.low),
+        c: Number(c.close),
+      };
+    })
+    .filter(
+      (c) =>
+        Number.isFinite(c.t) &&
+        Number.isFinite(c.o) &&
+        Number.isFinite(c.h) &&
+        Number.isFinite(c.l) &&
+        Number.isFinite(c.c) &&
+        c.t >= startMs &&
+        c.t <= endMs
+    )
+    .sort((a, b) => a.t - b.t);
+
+  // Remove duplicate timestamps.
+  const unique = [];
+  let lastT = null;
+
+  for (const candle of candles) {
+    if (candle.t === lastT) {
+      // Keep the later record if CoinCap returned duplicates.
+      unique[unique.length - 1] = candle;
+    } else {
+      unique.push(candle);
+      lastT = candle.t;
+    }
+  }
+
+  return unique;
 }
 
 // CoinCap history fallback (close-only series; we emit o=h=l=c). USD only; convert later if needed.
@@ -206,13 +260,46 @@ async function coincapHistory({ baseId, interval, startMs, endMs }) {
   const headers = process.env.COINCAP_API_KEY
     ? { Authorization: `Bearer ${process.env.COINCAP_API_KEY}` }
     : undefined;
-  const url = `${P.COINCAP}/assets/${baseId}/history?interval=${interval}&start=${startMs}&end=${endMs}`;
+
+  const url =
+    `${P.COINCAP}/assets/${baseId}/history` +
+    `?interval=${interval}` +
+    `&start=${startMs}` +
+    `&end=${endMs}`;
+
   const d = await httpGet(url, { headers }, 1);
-  return (d.data || []).map((pt) => {
-    const t = pt.time || pt.date || pt.period;
-    const price = Number(pt.priceUsd);
-    return { t, o: price, h: price, l: price, c: price };
-  });
+
+  return (d.data || [])
+    .map((pt) => {
+      let t = Number(pt.time ?? pt.period);
+
+      if (!Number.isFinite(t) && pt.date) {
+        t = new Date(pt.date).getTime();
+      }
+
+      // Seconds → milliseconds
+      if (Number.isFinite(t) && t < 10_000_000_000) {
+        t *= 1000;
+      }
+
+      const price = Number(pt.priceUsd);
+
+      return {
+        t,
+        o: price,
+        h: price,
+        l: price,
+        c: price,
+      };
+    })
+    .filter(
+      (c) =>
+        Number.isFinite(c.t) &&
+        Number.isFinite(c.c) &&
+        c.t >= startMs &&
+        c.t <= endMs
+    )
+    .sort((a, b) => a.t - b.t);
 }
 
 // Coinbase Exchange candles (public, no key). Granularities: 60,300,900,3600,21600,86400
