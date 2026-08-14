@@ -41,11 +41,10 @@ jobs:
       - name: Find current manifest for tag
         run: |
           OLD_DIGEST=$(doctl registries repository list-tags valuevisuals valuevisuals-api \
-            --format Tag,ManifestDigest \
-            --no-header | \
-            awk -v tag="$TAG" '$1 == tag {print $2}')
+            --output json |
+            jq -r --arg tag "$TAG" '.[] | select(.tag == $tag) | .manifest_digest')
 
-          if [ -n "$OLD_DIGEST" ]; then
+          if [ -n "$OLD_DIGEST" ] && [ "$OLD_DIGEST" != "null" ]; then
             echo "OLD_DIGEST=$OLD_DIGEST" >> "$GITHUB_ENV"
             echo "Existing $TAG image: $OLD_DIGEST"
           else
