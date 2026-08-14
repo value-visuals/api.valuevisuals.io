@@ -156,14 +156,114 @@ export async function signout(req, res, next) {
   }
 }
 
+// POST /auth/me 
+export async function me(req, res, next) {
+  try {
+    const uid = req.user?.uid;
 
-export function me(req, res) {
-  res.json({
-    uid: req.user.uid,
-    email: req.user.email || null,
-    auth_time: req.user.auth_time,
-    claims: req.user,
-  });
+    if (!uid) {
+      return res.status(401).json({ error: "Unauthenticated" });
+    }
+
+    const userDoc = await db.collection("users").doc(uid).get();
+
+    if (!userDoc.exists) {
+      return res.json({
+        uid,
+        email: req.user.email || null,
+        displayName: req.user.name || null,
+        interests: [],
+        claims: req.user
+      });
+    }
+    const profile = userDoc.data() || {};
+
+    return res.json({
+      uid,
+      email: profile.email || req.user.email || null,
+      displayName: profile.displayName || null,
+      interests: Array.isArray(profile.interests)
+        ? profile.interests
+        : [],
+      role: profile.role || "user",
+      auth_time: req.user.auth_time,
+      claims: req.user
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST update user interests
+export async function updateInterests(req, res, next) {
+  try {
+    const uid = req.user?.uid;
+
+    if (!uid) {
+      return res.status(401).json({
+        error: "Unauthenticated",
+      });
+    }
+
+    const ALLOWED = new Set([
+      "bitcoin",
+      "ethereum",
+      "gold",
+      "silver",
+    ]);
+
+    // An explicit [] is valid and means "remove all interests".
+    if (!Array.isArray(req.body?.interests)) {
+      return res.status(400).json({
+        error: "interests must be an array",
+      });
+    }
+
+    const interests = [
+      ...new Set(
+        req.body.interests
+          .filter((value) => typeof value === "string")
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => ALLOWED.has(value))
+      ),
+    ];
+
+    await db.collection("users").doc(uid).set(
+      {
+        interests,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return res.json({
+      interests,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// 
+export async function mirrorAuthedEmail(req, res, next) {
+  try {
+    const uid = req.user?.uid;
+    const email = req.user?.email;
+    if (!uid) return res.status(401).json({ error: "Unauthenticated" });
+    if (!email) return res.status(400).json({ error: "No email on session" });
+
+    await db.collection("users").doc(uid).set(
+      {
+        email: String(email).toLowerCase(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return res.json({ ok: true, email });
+  } catch (err) {
+    next(err);
+  }
 }
 
 // SUBSCRIBERS ----------------------------------------------
@@ -409,23 +509,3 @@ export async function applyVolunteer(req, res, next) {
   }
 }
 
-export async function mirrorAuthedEmail(req, res, next) {
-  try {
-    const uid = req.user?.uid;
-    const email = req.user?.email;
-    if (!uid) return res.status(401).json({ error: "Unauthenticated" });
-    if (!email) return res.status(400).json({ error: "No email on session" });
-
-    await db.collection("users").doc(uid).set(
-      {
-        email: String(email).toLowerCase(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    return res.json({ ok: true, email });
-  } catch (err) {
-    next(err);
-  }
-}
