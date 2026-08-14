@@ -173,6 +173,7 @@ export async function me(req, res, next) {
         email: req.user.email || null,
         displayName: req.user.name || null,
         interests: [],
+        claims: req.user
       });
     }
     const profile = userDoc.data() || {};
@@ -186,6 +187,7 @@ export async function me(req, res, next) {
         : [],
       role: profile.role || "user",
       auth_time: req.user.auth_time,
+      claims: req.user
     });
   } catch (err) {
     next(err);
