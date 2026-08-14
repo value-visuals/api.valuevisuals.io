@@ -28,7 +28,7 @@ jobs:
 
       - name: Log in to DigitalOcean Container Registry
         run: |
-          doctl registries login valuevisuals-api --expiry-seconds 1200
+          doctl registries login valuevisuals --expiry-seconds 1200
 
       - name: Set image tag
         run: |
