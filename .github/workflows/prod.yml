@@ -48,4 +48,5 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64
           push: true
+          provenance: false
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
