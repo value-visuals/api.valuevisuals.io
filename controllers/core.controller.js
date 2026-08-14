@@ -175,12 +175,6 @@ export async function me(req, res, next) {
         interests: [],
       });
     }
-    console.log({
-      uid,
-        email: req.user.email || null,
-        displayName: req.user.name || null,
-        interests: [],
-    })
     const profile = userDoc.data() || {};
 
     return res.json({
