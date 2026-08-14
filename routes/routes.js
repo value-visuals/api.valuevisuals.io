@@ -72,5 +72,6 @@ router.delete("/user/metalswallet", requireAuth, wallets.deletePreciousHolding);
 
 // ✅ Settings (auth-protected)
 router.put("/user/email/mirror", requireAuth, c.mirrorAuthedEmail);
+router.put("/user/interests", requireAuth, c.updateInterests);
 
 export default router;
