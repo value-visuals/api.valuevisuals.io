@@ -38,19 +38,6 @@ jobs:
         run: |
           echo "Image: ${REGISTRY}/${IMAGE_NAME}:${TAG}"
 
-      - name: Find current manifest for tag
-        run: |
-          OLD_DIGEST=$(doctl registries repository list-tags valuevisuals valuevisuals-api \
-            --output json |
-            jq -r --arg tag "$TAG" '.[] | select(.tag == $tag) | .manifest_digest')
-
-          if [ -n "$OLD_DIGEST" ] && [ "$OLD_DIGEST" != "null" ]; then
-            echo "OLD_DIGEST=$OLD_DIGEST" >> "$GITHUB_ENV"
-            echo "Existing $TAG image: $OLD_DIGEST"
-          else
-            echo "No existing $TAG image found."
-          fi
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -63,13 +50,3 @@ jobs:
           push: true
           provenance: false
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
-
-      - name: Remove previous image for tag
-        if: env.OLD_DIGEST != ''
-        run: |
-          echo "Removing previous $TAG image: $OLD_DIGEST"
-
-          doctl registries repository delete-manifest \
-            valuevisuals-api \
-            "$OLD_DIGEST" \
-            --force
