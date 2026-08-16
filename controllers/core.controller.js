@@ -1,60 +1,48 @@
 import fetch from "node-fetch";
 import mime from "mime";
 import { admin, db, bucket } from "../config/firebase.js";
-import {
-  sendWelcomeEmail,
-  sendVolunteerApplicationReceipt,
-  notifyAdminOfVolunteer,
-} from "../mail/postmark.js";
+import { sendWelcomeEmail, sendVolunteerApplicationReceipt, notifyAdminOfVolunteer } from "../mail/postmark.js";
 
-// ENV + helpers
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
 const MIN_PASSWORD_LEN = Number(process.env.MIN_PASSWORD_LEN || 8);
+const ALLOWED_INTERESTS = new Set(["bitcoin", "ethereum", "gold", "silver"]);
+const AUTH_ERROR_MESSAGES = { EMAIL_NOT_FOUND: "No user found with that email", INVALID_PASSWORD: "Invalid password", USER_DISABLED: "User account is disabled" };
 
-function isValidEmail(email) {
-  return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
 
-// ---------- ROUTE CONTROLLERS ----------
+
+
+
+
+// Health
 
 export async function health(_req, res) {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 }
 
-// AUTH  ----------------------------------------------------
+// Auth
 
-// POST /auth/signup
 export async function signup(req, res, next) {
   try {
     const { email, password, displayName, interests } = req.body || {};
-    if (!isValidEmail(email))
-      return res.status(400).json({ error: "Valid email required" });
+
+    if (!isValidEmail(email)) return res.status(400).json({ error: "Valid email required" });
+
     if (!password || password.length < MIN_PASSWORD_LEN) {
-      return res
-        .status(400)
-        .json({ error: `Password must be at least ${MIN_PASSWORD_LEN} characters` });
+      return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LEN} characters` });
     }
 
-    // ---- interests: normalize & validate ----
-    const ALLOWED = new Set(["bitcoin", "ethereum", "gold", "silver"]);
-    const parsedInterests = Array.isArray(interests) ? interests : [];
-    const normalizedInterests = [...new Set(
-      parsedInterests
-        .filter((v) => typeof v === "string")
-        .map((v) => v.trim().toLowerCase())
-        .filter((v) => ALLOWED.has(v))
-    )];
+    const normalizedEmail = String(email).toLowerCase();
+    const normalizedInterests = normalizeInterests(interests);
 
     const userRecord = await admin.auth().createUser({
-      email: String(email).toLowerCase(),
+      email: normalizedEmail,
       password,
       displayName: displayName || undefined,
       emailVerified: false,
       disabled: false,
     });
 
-    const profileRef = db.collection("users").doc(userRecord.uid);
-    await profileRef.set(
+    await db.collection("users").doc(userRecord.uid).set(
       {
         email: userRecord.email,
         displayName: userRecord.displayName || null,
@@ -66,36 +54,32 @@ export async function signup(req, res, next) {
     );
 
     const customToken = await admin.auth().createCustomToken(userRecord.uid);
-    res.status(201).json({
+
+    return res.status(201).json({
       uid: userRecord.uid,
       customToken,
       info: "Exchange customToken for an ID token using Firebase client SDK.",
     });
   } catch (err) {
-    if (err?.code === "auth/email-already-exists") {
-      return res.status(409).json({ error: "Email already in use" });
-    }
+    if (err?.code === "auth/email-already-exists") return res.status(409).json({ error: "Email already in use" });
     next(err);
   }
 }
 
-// POST /auth/signin
 export async function signin(req, res, next) {
   try {
     const { email, password } = req.body || {};
-    if (!isValidEmail(email))
-      return res.status(400).json({ error: "Valid email required" });
-    if (!password)
-      return res.status(400).json({ error: "Password required" });
+
+    if (!isValidEmail(email)) return res.status(400).json({ error: "Valid email required" });
+    if (!password) return res.status(400).json({ error: "Password required" });
 
     if (!FIREBASE_WEB_API_KEY) {
-      return res.status(500).json({
-        error: "Server missing FIREBASE_WEB_API_KEY config",
-      });
+      return res.status(500).json({ error: "Server missing FIREBASE_WEB_API_KEY config" });
     }
 
     const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_WEB_API_KEY}`;
-    const r = await fetch(url, {
+
+    const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -105,18 +89,14 @@ export async function signin(req, res, next) {
       }),
     });
 
-    const data = await r.json();
-    if (!r.ok) {
-      const errMsg = data?.error?.message || "Authentication failed";
-      const map = {
-        EMAIL_NOT_FOUND: "No user found with that email",
-        INVALID_PASSWORD: "Invalid password",
-        USER_DISABLED: "User account is disabled",
-      };
-      return res.status(401).json({ error: map[errMsg] || errMsg });
+    const data = await response.json();
+
+    if (!response.ok) {
+      const firebaseError = data?.error?.message || "Authentication failed";
+      return res.status(401).json({ error: AUTH_ERROR_MESSAGES[firebaseError] || firebaseError });
     }
 
-    res.json({
+    return res.json({
       uid: data.localId,
       idToken: data.idToken,
       refreshToken: data.refreshToken,
@@ -127,43 +107,32 @@ export async function signin(req, res, next) {
   }
 }
 
-// POST /auth/signout
 export async function signout(req, res, next) {
   try {
-    const hdr = req.headers.authorization || "";
-    const [, token] = hdr.split(" ");
-    if (!token)
-      return res.status(400).json({ error: "Missing bearer token" });
+    const [, token] = (req.headers.authorization || "").split(" ");
 
-    // Verify the token and revoke it
+    if (!token) return res.status(400).json({ error: "Missing bearer token" });
+
     const decoded = await admin.auth().verifyIdToken(token);
     await admin.auth().revokeRefreshTokens(decoded.uid);
 
-    // Optional: log or update user record
     await db.collection("users").doc(decoded.uid).set(
-      {
-        lastSignoutAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
+      { lastSignoutAt: admin.firestore.FieldValue.serverTimestamp() },
       { merge: true }
     );
 
     return res.json({ message: "Successfully signed out" });
   } catch (err) {
-    if (err.code === "auth/id-token-expired") {
-      return res.status(400).json({ error: "Token already expired" });
-    }
+    if (err?.code === "auth/id-token-expired") return res.status(400).json({ error: "Token already expired" });
     next(err);
   }
 }
 
-// POST /auth/me 
 export async function me(req, res, next) {
   try {
     const uid = req.user?.uid;
 
-    if (!uid) {
-      return res.status(401).json({ error: "Unauthenticated" });
-    }
+    if (!uid) return res.status(401).json({ error: "Unauthenticated" });
 
     const userDoc = await db.collection("users").doc(uid).get();
 
@@ -173,60 +142,42 @@ export async function me(req, res, next) {
         email: req.user.email || null,
         displayName: req.user.name || null,
         interests: [],
-        claims: req.user
+        claims: req.user,
       });
     }
+
     const profile = userDoc.data() || {};
 
     return res.json({
       uid,
       email: profile.email || req.user.email || null,
       displayName: profile.displayName || null,
-      interests: Array.isArray(profile.interests)
-        ? profile.interests
-        : [],
+      interests: Array.isArray(profile.interests) ? profile.interests : [],
       role: profile.role || "user",
       auth_time: req.user.auth_time,
-      claims: req.user
+      claims: req.user,
     });
   } catch (err) {
     next(err);
   }
 }
 
-// POST update user interests
+function normalizeInterests(interests) {
+  if (!Array.isArray(interests)) return [];
+  return [...new Set(interests.filter((value) => typeof value === "string").map((value) => value.trim().toLowerCase()).filter((value) => ALLOWED_INTERESTS.has(value)))];
+}
+
 export async function updateInterests(req, res, next) {
   try {
     const uid = req.user?.uid;
 
-    if (!uid) {
-      return res.status(401).json({
-        error: "Unauthenticated",
-      });
-    }
+    if (!uid) return res.status(401).json({ error: "Unauthenticated" });
 
-    const ALLOWED = new Set([
-      "bitcoin",
-      "ethereum",
-      "gold",
-      "silver",
-    ]);
-
-    // An explicit [] is valid and means "remove all interests".
     if (!Array.isArray(req.body?.interests)) {
-      return res.status(400).json({
-        error: "interests must be an array",
-      });
+      return res.status(400).json({ error: "interests must be an array" });
     }
 
-    const interests = [
-      ...new Set(
-        req.body.interests
-          .filter((value) => typeof value === "string")
-          .map((value) => value.trim().toLowerCase())
-          .filter((value) => ALLOWED.has(value))
-      ),
-    ];
+    const interests = normalizeInterests(req.body.interests);
 
     await db.collection("users").doc(uid).set(
       {
@@ -236,19 +187,17 @@ export async function updateInterests(req, res, next) {
       { merge: true }
     );
 
-    return res.json({
-      interests,
-    });
+    return res.json({ interests });
   } catch (err) {
     next(err);
   }
 }
 
-// 
 export async function mirrorAuthedEmail(req, res, next) {
   try {
     const uid = req.user?.uid;
     const email = req.user?.email;
+
     if (!uid) return res.status(401).json({ error: "Unauthenticated" });
     if (!email) return res.status(400).json({ error: "No email on session" });
 
@@ -266,33 +215,32 @@ export async function mirrorAuthedEmail(req, res, next) {
   }
 }
 
-// SUBSCRIBERS ----------------------------------------------
+// Subscribers
+
+function isValidEmail(email) {
+  return typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
 export async function subscribe(req, res, next) {
   try {
     const { email } = req.body || {};
-    if (!email || typeof email !== "string") {
-      return res.status(400).json({ error: "Email is required" });
-    }
+
+    if (!email || typeof email !== "string") return res.status(400).json({ error: "Email is required" });
 
     const normalized = email.trim().toLowerCase();
-    await db
-      .collection("subscribers")
-      .doc(normalized)
-      .set(
-        {
-          email: normalized,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          subscribed: true,
-        },
-        { merge: true }
-      );
 
-    Promise.resolve(sendWelcomeEmail(normalized)).catch((err) =>
-      console.error("Welcome email failed:", err?.message || err)
+    await db.collection("subscribers").doc(normalized).set(
+      {
+        email: normalized,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        subscribed: true,
+      },
+      { merge: true }
     );
 
-    res.json({ message: `Saved: ${normalized}` });
+    void Promise.resolve(sendWelcomeEmail(normalized)).catch((err) => console.error("Welcome email failed:", err?.message || err));
+
+    return res.json({ message: `Saved: ${normalized}` });
   } catch (err) {
     next(err);
   }
@@ -301,22 +249,19 @@ export async function subscribe(req, res, next) {
 export async function subscriberCount(_req, res, next) {
   try {
     const snapshot = await db.collection("subscribers").count().get();
-    res.json({ totalSubscribers: snapshot.data().count });
+    return res.json({ totalSubscribers: snapshot.data().count });
   } catch (err) {
     next(err);
   }
 }
 
-// CAREERS ---------------------------------------------------
+// Careers
 
 export async function getCareers(_req, res, next) {
   try {
     const snapshot = await db.collection("careers").get();
-    const careers = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-    res.json({ careers });
+    const careers = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    return res.json({ careers });
   } catch (err) {
     next(err);
   }
@@ -324,10 +269,11 @@ export async function getCareers(_req, res, next) {
 
 export async function getCareer(req, res, next) {
   try {
-    const id = req.params.id;
-    const doc = await db.collection("careers").doc(id).get();
+    const doc = await db.collection("careers").doc(req.params.id).get();
+
     if (!doc.exists) return res.status(404).json({ error: "Career not found" });
-    res.json({ career: { id: doc.id, ...doc.data() } });
+
+    return res.json({ career: { id: doc.id, ...doc.data() } });
   } catch (err) {
     next(err);
   }
@@ -335,43 +281,50 @@ export async function getCareer(req, res, next) {
 
 export async function addCareers(req, res, next) {
   try {
-    let careers = req.body;
-    if (!Array.isArray(careers)) careers = [careers];
-    if (careers.length === 0)
-      return res.status(400).json({ error: "No job postings provided" });
+    const careers = Array.isArray(req.body) ? req.body : [req.body];
+
+    if (careers.length === 0) return res.status(400).json({ error: "No job postings provided" });
 
     const batch = db.batch();
     const careersRef = db.collection("careers");
 
     careers.forEach((job) => {
       const docRef = careersRef.doc();
+
       batch.set(docRef, {
         ...job,
-        postedAt:
-          job.postedAt || admin.firestore.FieldValue.serverTimestamp(),
+        postedAt: job.postedAt || admin.firestore.FieldValue.serverTimestamp(),
         active: job.active !== undefined ? job.active : true,
       });
     });
 
     await batch.commit();
-    res.json({ message: `${careers.length} job(s) added successfully.` });
+
+    return res.json({ message: `${careers.length} job(s) added successfully.` });
   } catch (err) {
     next(err);
   }
 }
 
-// VOLUNTEERS ------------------------------------------------
+async function resolveJobTitle(jobId, suppliedTitle) {
+  const jobTitle = suppliedTitle ? String(suppliedTitle).trim() : null;
+  if (jobTitle || !jobId) return jobTitle;
+
+  const jobDoc = await db.collection("careers").doc(String(jobId)).get();
+  if (!jobDoc.exists) return null;
+
+  const data = jobDoc.data() || {};
+  return data.title || data.name || data.jobTitle || null;
+}
+
+// Volunteers
 
 export async function listVolunteers(_req, res, next) {
   try {
-    const snapshot = await db
-      .collection("volunteers")
-      .orderBy("createdAt", "desc")
-      .limit(100)
-      .get();
+    const snapshot = await db.collection("volunteers").orderBy("createdAt", "desc").limit(100).get();
+    const volunteers = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
-    const volunteers = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-    res.json({ volunteers });
+    return res.json({ volunteers });
   } catch (err) {
     next(err);
   }
@@ -379,64 +332,46 @@ export async function listVolunteers(_req, res, next) {
 
 export async function applyVolunteer(req, res, next) {
   try {
-    const {
-      firstName,
-      middleName,
-      lastName,
-      phone,
-      email,
-      socials,
-      jobId,
-      jobTitle: jtRaw,
-    } = req.body || {};
+    const { firstName, middleName, lastName, phone, email, socials, jobId, jobTitle: jtRaw } = req.body || {};
 
     if (!firstName || !lastName || !phone || !email) {
-      return res
-        .status(400)
-        .json({ error: "firstName, lastName, phone, and email are required." });
+      return res.status(400).json({ error: "firstName, lastName, phone, and email are required." });
     }
 
-    // --- Parse socials ---
     let socialsParsed = [];
+
     if (typeof socials === "string" && socials.trim()) {
       try {
         socialsParsed = JSON.parse(socials);
       } catch {
-        socialsParsed = socials
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
+        socialsParsed = socials.split(",").map((s) => s.trim()).filter(Boolean);
       }
-    } else if (Array.isArray(socials)) socialsParsed = socials;
+    } else if (Array.isArray(socials)) {
+      socialsParsed = socials;
+    }
 
-    let socialsNormalized = {};
+    const socialsNormalized = {};
+
     if (Array.isArray(socialsParsed)) {
       socialsParsed.forEach((entry) => {
+        if (typeof entry !== "string") return;
+
         const [platform, handle] = entry.split(/[:=]/).map((s) => s.trim());
-        if (platform && handle)
-          socialsNormalized[platform.toLowerCase()] = handle;
+
+        if (platform && handle) socialsNormalized[platform.toLowerCase()] = handle;
       });
-    } else if (typeof socialsParsed === "object" && socialsParsed !== null) {
+    } else if (socialsParsed && typeof socialsParsed === "object") {
       Object.entries(socialsParsed).forEach(([platform, handle]) => {
-        if (platform && handle)
-          socialsNormalized[platform.toLowerCase()] = String(handle).trim();
+        if (platform && handle) socialsNormalized[platform.toLowerCase()] = String(handle).trim();
       });
     }
 
-    // --- Resolve job title ---
-    let jobTitle = jtRaw ? String(jtRaw).trim() : null;
-    if (jobId && !jobTitle) {
-      const jobDoc = await db.collection("careers").doc(String(jobId)).get();
-      if (jobDoc.exists) {
-        const data = jobDoc.data() || {};
-        jobTitle = data.title || data.name || data.jobTitle || null;
-      }
-    }
-
+    const jobTitle = await resolveJobTitle(jobId, jtRaw);
     const docRef = db.collection("volunteers").doc();
     const createdAt = admin.firestore.FieldValue.serverTimestamp();
 
     let resumeUrl = null;
+
     if (req.file) {
       const ext = mime.getExtension(req.file.mimetype) || "bin";
       const fileName = `volunteers/${docRef.id}/resume.${ext}`;
@@ -452,15 +387,18 @@ export async function applyVolunteer(req, res, next) {
         action: "read",
         expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
       });
+
       resumeUrl = signedUrl;
     }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
 
     await docRef.set({
       firstName: String(firstName).trim(),
       middleName: middleName ? String(middleName).trim() : null,
       lastName: String(lastName).trim(),
       phone: String(phone).trim(),
-      email: String(email).trim().toLowerCase(),
+      email: normalizedEmail,
       socials: socialsNormalized,
       resumeUrl,
       resumeUploaded: Boolean(req.file),
@@ -476,15 +414,15 @@ export async function applyVolunteer(req, res, next) {
       middleName,
       lastName,
       phone,
-      email: String(email).trim().toLowerCase(),
+      email: normalizedEmail,
       socials: socialsNormalized,
       resumeUrl,
       createdAt: new Date().toISOString(),
     };
 
-    Promise.allSettled([
+    void Promise.allSettled([
       sendVolunteerApplicationReceipt({
-        to: String(email).trim().toLowerCase(),
+        to: normalizedEmail,
         firstName,
         jobTitle,
         jobId: jobId ? String(jobId) : undefined,
@@ -494,11 +432,18 @@ export async function applyVolunteer(req, res, next) {
         jobTitle,
         jobId: jobId ? String(jobId) : undefined,
       }),
-    ]).catch((err) =>
-      console.error("Error sending volunteer emails:", err?.message || err)
-    );
+    ]).then((results) => {
+      const failed = results.filter((result) => result.status === "rejected");
 
-    res.json({
+      if (failed.length) {
+        console.error(
+          "Volunteer email notification failure:",
+          failed.map((result) => result.reason)
+        );
+      }
+    });
+
+    return res.json({
       message: "Application received",
       id: docRef.id,
       resumeUploaded: Boolean(req.file),
@@ -508,4 +453,3 @@ export async function applyVolunteer(req, res, next) {
     next(err);
   }
 }
-
