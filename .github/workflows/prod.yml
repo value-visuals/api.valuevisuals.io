@@ -6,7 +6,6 @@ on:
       - main
       - qa
       - test
-      - feature/automated-digitalocean-deployment
   workflow_dispatch:
 
 jobs:
@@ -33,11 +32,7 @@ jobs:
 
       - name: Set image tag
         run: |
-          if [ "${GITHUB_REF_NAME}" = "feature/automated-digitalocean-deployment" ]; then
-            echo "TAG=test" >> "$GITHUB_ENV"
-          else
-            echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
-          fi
+          echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
 
       - name: Show image destination
         run: |
