@@ -8,11 +8,6 @@ const MIN_PASSWORD_LEN = Number(process.env.MIN_PASSWORD_LEN || 8);
 const ALLOWED_INTERESTS = new Set(["bitcoin", "ethereum", "gold", "silver"]);
 const AUTH_ERROR_MESSAGES = { EMAIL_NOT_FOUND: "No user found with that email", INVALID_PASSWORD: "Invalid password", USER_DISABLED: "User account is disabled" };
 
-
-
-
-
-
 // Health
 
 export async function health(_req, res) {
@@ -246,7 +241,7 @@ export async function subscribe(req, res, next) {
   }
 }
 
-export async function subscriberCount(_req, res, next) {
+export async function subscriberCount(req, res, next) {
   try {
     const snapshot = await db.collection("subscribers").count().get();
     return res.json({ totalSubscribers: snapshot.data().count });
@@ -257,7 +252,7 @@ export async function subscriberCount(_req, res, next) {
 
 // Careers
 
-export async function getCareers(_req, res, next) {
+export async function getCareers(req, res, next) {
   try {
     const snapshot = await db.collection("careers").get();
     const careers = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
@@ -319,7 +314,7 @@ async function resolveJobTitle(jobId, suppliedTitle) {
 
 // Volunteers
 
-export async function listVolunteers(_req, res, next) {
+export async function listVolunteers(req, res, next) {
   try {
     const snapshot = await db.collection("volunteers").orderBy("createdAt", "desc").limit(100).get();
     const volunteers = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
