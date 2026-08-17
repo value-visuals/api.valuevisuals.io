@@ -49,13 +49,6 @@ app.use(
 // ----- Rate limiting (public API) -----
 // DigitalOcean App Platform provides the actual client IP
 // in the "do-connecting-ip" header.
-//
-// We intentionally do NOT enable Express "trust proxy" because
-// DigitalOcean's X-Forwarded-For header identifies the DigitalOcean
-// ingress server, not the original client.
-//
-// See:
-// https://docs.digitalocean.com/support/where-can-i-find-the-client-ip-address-of-a-request-connecting-to-my-app/
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX || 300),
