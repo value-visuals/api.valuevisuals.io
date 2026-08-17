@@ -5,7 +5,7 @@ import helmet from "helmet";
 import compression from "compression";
 import morgan from "morgan";
 import cors from "cors";
-import { rateLimit, ipKeyGenerator } from "express-rate-limit";
+import rateLimit from "express-rate-limit";
 import routes from "./routes/routes.js";
 import { notFound, errorHandler } from "./middlewares/error.js";
 
@@ -13,7 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 5015);
 const NODE_ENV = process.env.NODE_ENV || "development";
 
-// ----- Security & perf -----
+// ----- Security & performance -----
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(compression());
@@ -49,6 +49,13 @@ app.use(
 // ----- Rate limiting (public API) -----
 // DigitalOcean App Platform provides the actual client IP
 // in the "do-connecting-ip" header.
+//
+// We intentionally do NOT enable Express "trust proxy" because
+// DigitalOcean's X-Forwarded-For header identifies the DigitalOcean
+// ingress server, not the original client.
+//
+// See:
+// https://docs.digitalocean.com/support/where-can-i-find-the-client-ip-address-of-a-request-connecting-to-my-app/
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX || 300),
@@ -58,12 +65,17 @@ const apiLimiter = rateLimit({
   keyGenerator: (req) => {
     const clientIp = req.get("do-connecting-ip");
 
+    // DigitalOcean App Platform
     if (clientIp) {
-      return ipKeyGenerator(clientIp);
+      return clientIp;
     }
 
-    // Fallback for local development or unexpected requests.
-    return ipKeyGenerator(req.ip);
+    // Local development / unexpected requests
+    return req.ip;
+  },
+
+  validate: {
+    xForwardedForHeader: false,
   },
 });
 
