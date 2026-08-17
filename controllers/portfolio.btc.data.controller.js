@@ -172,6 +172,7 @@ async function getBtcAddressCoreStats(address) {
     totalSent,        // sats
     balance: confirmedBalance, // sats
     pendingDelta: mempoolDelta, // sats
+    balanceIncludingMempool: balanceIncludingMempool, // sats
     txCount: Number(data?.chain_stats?.tx_count || 0)
   };
 }

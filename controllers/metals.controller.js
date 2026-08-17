@@ -140,18 +140,27 @@ async function getUsdToFiatRate(targetFiat /* "USD"|"EUR"|"GBP" */) {
     const { data } = await axios.get(FX_COINBASE, { timeout: 8000 });
     const rateStr = data?.data?.rates?.[fiat];
     const rate = rateStr != null ? Number(rateStr) : undefined;
-    if (rate && isFinite(rate) && rate > 0) { setFx(cacheKey, rate, 300); return rate; }
-  } catch {}
+
+    if (rate && Number.isFinite(rate) && rate > 0) {
+      setFx(cacheKey, rate, 300);
+      return rate;
+    }
+  } catch {
+    // Ignore Coinbase failure and try Open ER fallback.
+  }
 
   // 2) Open ER fallback
   try {
     const { data } = await axios.get(FX_OPEN_ER, { timeout: 8000 });
     const rate = data?.rates?.[fiat];
-    if (rate && isFinite(Number(rate)) && Number(rate) > 0) {
+
+    if (rate && Number.isFinite(Number(rate)) && Number(rate) > 0) {
       setFx(cacheKey, Number(rate), 300);
       return Number(rate);
     }
-  } catch {}
+  } catch {
+    // Ignore Open ER failure; no more FX providers available.
+  }
 
   throw new Error(`FX rate not available for ${fiat}`);
 }
@@ -284,8 +293,3 @@ export async function getChart(req, res) {
     });
   }
 }
-
-export default {
-  getSummary,
-  getChart,
-};
