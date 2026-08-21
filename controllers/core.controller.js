@@ -106,19 +106,57 @@ export async function signout(req, res, next) {
   try {
     const [, token] = (req.headers.authorization || "").split(" ");
 
-    if (!token) return res.status(400).json({ error: "Missing bearer token" });
+    if (!token) {
+      return res.status(400).json({
+        error: "Missing bearer token",
+        code: "AUTH_REQUIRED",
+      });
+    }
 
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await admin.auth().verifyIdToken(
+      token,
+      true
+    );
+
     await admin.auth().revokeRefreshTokens(decoded.uid);
 
     await db.collection("users").doc(decoded.uid).set(
-      { lastSignoutAt: admin.firestore.FieldValue.serverTimestamp() },
-      { merge: true }
+      {
+        lastSignoutAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+      },
+      {
+        merge: true,
+      }
     );
 
-    return res.json({ message: "Successfully signed out" });
+    console.log(
+      `[AUTH] Firebase refresh tokens revoked for ${decoded.uid}`
+    );
+
+    return res.json({
+      ok: true,
+      revoked: true,
+      message: "Successfully signed out",
+    });
   } catch (err) {
-    if (err?.code === "auth/id-token-expired") return res.status(400).json({ error: "Token already expired" });
+    console.error(
+      "[AUTH] Signout error:",
+      err?.code,
+      err?.message
+    );
+
+    if (
+      err?.code === "auth/id-token-expired" ||
+      err?.code === "auth/id-token-revoked"
+    ) {
+      return res.json({
+        ok: true,
+        revoked: false,
+        alreadyInvalid: true,
+      });
+    }
+
     next(err);
   }
 }
