@@ -1,295 +1,393 @@
 // controllers/metals.controller.js
 import axios from "axios";
+import {
+  getMarketData,
+  getCandlesInRange,
+  downsampleCandles,
+} from "../services/metals-market-cache.js";
 
-/**
- * API Ninjas
- * Docs:
- *   - Commodity Price (spot):      https://api-ninjas.com/api/commodityprice
- *   - Commodity Historical:        https://api-ninjas.com/api/commodityprice (…historical on host)
- * Endpoints:
- *   - GET https://api.api-ninjas.com/v1/commodityprice?name=gold
- *   - GET https://api.api-ninjas.com/v1/commoditypricehistorical?name=gold&period=1h&start=1700000000&end=1700100000
- */
+const SUPPORTED_SYMBOLS = new Set(["XAU", "XAG"]);
+const SUPPORTED_CURRENCIES = new Set(["USD", "EUR", "GBP"]);
+const MAX_POINTS = 10000;
+const DAY_MS = 86400000;
 
-const NINJAS_BASE = "https://api.api-ninjas.com/v1";
-const API_KEY = process.env.API_NINJA_API_KEY || process.env.API_NINJAS_API_KEY || process.env.API_NINJA_APIKEY;
+const norm = (v) => String(v ?? "").trim().toUpperCase();
 
-if (!API_KEY) {
-  console.warn(
-    "[metals.controller] Missing API_NINJA_API_KEY (or API_NINJAS_API_KEY). " +
-      "Set it in your environment to enable metals endpoints."
-  );
+function normCurrency(v) {
+  const c = norm(v || "USD");
+  return SUPPORTED_CURRENCIES.has(c) ? c : "USD";
 }
 
-/* --------------------------- helpers --------------------------- */
-
-function toNum(x) {
-  const n = Number(x);
+function toNum(v) {
+  const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
-function unixNowSec() {
-  return Math.floor(Date.now() / 1000);
+function parseSymbol(v) {
+  const raw = norm(v || "XAU/USD");
+  return { symbol: raw.includes("/") ? raw.split("/")[0] : raw };
 }
 
-function toISOFromUnix(sec) {
-  const t = Number(sec) * 1000;
-  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+function parseRangeToDays(range) {
+  const m = String(range || "30d").trim().toLowerCase()
+    .match(/^(\d+(?:\.\d+)?)\s*([dwmy])$/);
+
+  if (!m) return 30;
+
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return 30;
+
+  return n * ({ d: 1, w: 7, m: 30, y: 365 }[m[2]] || 1);
 }
 
-async function ninjaGet(path, params = {}) {
-  const url = `${NINJAS_BASE}${path}`;
-  try {
-    const { data } = await axios.get(url, {
-      params,
-      headers: { "X-Api-Key": API_KEY },
-      timeout: 10_000,
-    });
-    return data;
-  } catch (err) {
-    // Normalize API Ninjas error shapes
-    const status = err?.response?.status;
-    const msg = err?.response?.data?.error || err?.response?.data?.message || err.message;
-    const e = new Error(msg || "API Ninjas request failed");
-    e.status = status || 500;
-    e.expose = true;
-    throw e;
-  }
-}
+function intervalToMilliseconds(interval, days) {
+  const v = String(interval || "auto").trim().toLowerCase();
 
-// symbol "XAU/USD" → { name: "gold", base: "XAU", currency: "USD" }
-function parseSymbol(symRaw) {
-  const symbol = String(symRaw || "XAU/USD").toUpperCase();
-  const [base, currency] = symbol.split("/");
-  const name = base === "XAU" ? "gold"
-             : base === "XAG" ? "silver"
-             : base === "XPT" ? "platinum"
-             : base === "XPD" ? "palladium"
-             : "gold";
-  return { symbol, base, currency: currency || "USD", name };
-}
-
-/**
- * Map UI ranges to {period, start, end}. We also accept "1w"/"2w".
- * Period choices keep responses lean but smooth for charts.
- */
-function rangeToHistoricalParams(rangeIn) {
-  const range = String(rangeIn || "30d").toLowerCase();
-  const now = unixNowSec();
-
-  function fromDays(days, period) {
-    const secs = Math.max(1, Math.floor(Number(days))) * 24 * 60 * 60;
-    return { period, start: now - secs, end: now };
+  if (v === "auto") {
+    if (days <= 2) return 15 * 60 * 1000;
+    if (days <= 7) return 30 * 60 * 1000;
+    if (days <= 30) return 60 * 60 * 1000;
+    if (days <= 90) return 4 * 60 * 60 * 1000;
+    if (days <= 180) return 12 * 60 * 60 * 1000;
+    return DAY_MS;
   }
 
-  switch (range) {
-    case "1d":
-      return fromDays(1, "15m");     // 15-min bars
-    case "2d":
-      return fromDays(2, "30m");     // 30-min bars
-    case "3d":
-      return fromDays(3, "1h");      // 1-hour bars
-    case "1w":
-    case "7d":
-      return fromDays(7, "4h");      // 4-hour bars
-    case "2w":
-    case "14d":
-      return fromDays(14, "4h");     // 4-hour bars
-    case "30d":
-      return fromDays(30, "1d");     // 1-day bars
-    case "60d":
-      return fromDays(60, "1d");     // 1-day bars
-    case "90d":
-      return fromDays(90, "1d");     // 1-day bars
-    case "180d":
-      return fromDays(180, "1d");    // 2-day bars
-    case "1y":
-    case "365d":
-      return fromDays(365, "1d");    // 2-day bars (coarser)
-    default:
-      return fromDays(30, "1d");     // fallback
+  return ({
+    m1: 60000,
+    m5: 300000,
+    m15: 900000,
+    m30: 1800000,
+    h1: 3600000,
+    h2: 7200000,
+    h4: 14400000,
+    h6: 21600000,
+    h12: 43200000,
+    d1: DAY_MS,
+  }[v] || 3600000);
+}
+
+// FX
+const fxCache = new Map();
+const FX_TTL_MS =
+  Number(process.env.METALS_FX_CACHE_TTL_SECONDS || 300) * 1000;
+
+const FX_URLS = [
+  "https://api.coinbase.com/v2/exchange-rates?currency=USD",
+  "https://open.er-api.com/v6/latest/USD",
+];
+
+function getFxCache(key) {
+  const cached = fxCache.get(key);
+  if (!cached || Date.now() > cached.expiresAt) {
+    fxCache.delete(key);
+    return null;
   }
+  return cached.value;
 }
 
-// --- NEW: tiny cache for FX ---
-const fxCache = new Map(); // key -> { val, exp }
-function setFx(key, val, ttlSec = 300) {
-  fxCache.set(key, { val, exp: Date.now() + ttlSec * 1000 });
-}
-function getFx(key) {
-  const x = fxCache.get(key);
-  if (!x) return null;
-  if (Date.now() > x.exp) { fxCache.delete(key); return null; }
-  return x.val;
+function setFxCache(key, value) {
+  fxCache.set(key, {
+    value,
+    expiresAt: Date.now() + FX_TTL_MS,
+  });
 }
 
-// --- NEW: same FX sources you already use in crypto controller ---
-const FX_COINBASE = "https://api.coinbase.com/v2/exchange-rates?currency=USD";
-const FX_OPEN_ER  = "https://open.er-api.com/v6/latest/USD";
+async function getUsdToFiatRate(target) {
+  const currency = normCurrency(target);
+  if (currency === "USD") return 1;
 
-async function getUsdToFiatRate(targetFiat /* "USD"|"EUR"|"GBP" */) {
-  const fiat = String(targetFiat || "USD").toUpperCase();
-  if (fiat === "USD") return 1;
+  const key = `USD:${currency}`;
+  const cached = getFxCache(key);
+  if (Number.isFinite(cached)) return cached;
 
-  const cacheKey = `fx:USD:${fiat}`;
-  const hit = getFx(cacheKey);
-  if (hit) return hit;
+  for (const url of FX_URLS) {
+    try {
+      const { data } = await axios.get(url, { timeout: 8000 });
+      const rate = Number(
+        data?.data?.rates?.[currency] ?? data?.rates?.[currency]
+      );
 
-  // 1) Coinbase FX
-  try {
-    const { data } = await axios.get(FX_COINBASE, { timeout: 8000 });
-    const rateStr = data?.data?.rates?.[fiat];
-    const rate = rateStr != null ? Number(rateStr) : undefined;
-
-    if (rate && Number.isFinite(rate) && rate > 0) {
-      setFx(cacheKey, rate, 300);
-      return rate;
-    }
-  } catch {
-    // Ignore Coinbase failure and try Open ER fallback.
-  }
-
-  // 2) Open ER fallback
-  try {
-    const { data } = await axios.get(FX_OPEN_ER, { timeout: 8000 });
-    const rate = data?.rates?.[fiat];
-
-    if (rate && Number.isFinite(Number(rate)) && Number(rate) > 0) {
-      setFx(cacheKey, Number(rate), 300);
-      return Number(rate);
-    }
-  } catch {
-    // Ignore Open ER failure; no more FX providers available.
-  }
-
-  throw new Error(`FX rate not available for ${fiat}`);
-}
-
-/* ----------------------- GET /metals/summary ----------------------- */
-/**
- * Optional query params:
- *   base=[XAU|XAG|XPT|XPD]     (default: all four)
- *   currency=[USD]             (API Ninjas quotes are USD; we keep USD)
- */
-// ----------------------- GET /metals/summary -----------------------
-export async function getSummary(req, res) {
-  try {
-    if (!API_KEY) {
-      return res.status(500).json({ error: "Server is not configured with API_NINJA_API_KEY" });
-    }
-
-    const rawBase = String(req.query.base || "").toUpperCase();
-    const base =
-      rawBase === "GOLD" ? "XAU" :
-      rawBase === "SILVER" ? "XAG" :
-      rawBase === "PLATINUM" ? "XPT" :
-      rawBase === "PALLADIUM" ? "XPD" :
-      rawBase || undefined;
-
-    // NEW: accept EUR/GBP; default USD
-    const reqCurrency = String(req.query.currency || "USD").toUpperCase();
-    const currency = ["USD", "EUR", "GBP"].includes(reqCurrency) ? reqCurrency : "USD";
-
-    const ALL = ["XAU", "XAG", "XPT", "XPD"];
-    const wanted = ALL.filter((b) => !base || b === base);
-    const toName = (b) => (b === "XAU" ? "gold" : b === "XAG" ? "silver" : b === "XPT" ? "platinum" : "palladium");
-
-    const items = [];
-    for (const b of wanted) {
-      const name = toName(b);
-
-      // 1) Always fetch USD spot from API Ninjas (their native quote)
-      const nin = await ninjaGet("/commodityprice", { name }); // USD-only
-      const row = Array.isArray(nin) ? nin[0] : nin;
-      const priceUsd = toNum(row?.price);
-      const time = row?.time != null ? Number(row.time) : null;
-
-      // 2) Convert to requested currency using FX (only if not USD)
-      let price = priceUsd;
-      if (price != null && currency !== "USD") {
-        const r = await getUsdToFiatRate(currency);
-        price = priceUsd * r;
+      if (Number.isFinite(rate) && rate > 0) {
+        setFxCache(key, rate);
+        return rate;
       }
-
-      items.push({
-        symbol: `${b}/${currency}`,
-        name,
-        currency,
-        price,
-        change: null,
-        percentChange: null,
-        open: null,
-        high: null,
-        low: null,
-        previousClose: null,
-        datetime: time ? new Date(time * 1000).toISOString() : new Date().toISOString(),
-        provider: currency === "USD" ? "api-ninjas" : "api-ninjas+fx",
-      });
+    } catch (error) {
+      console.warn(
+        `[metals.controller] FX failed for ${currency}:`,
+        error?.message || error
+      );
     }
-
-    return res.json({ updatedAt: new Date().toISOString(), items });
-  } catch (err) {
-    console.error("[/metals/summary] error:", err);
-    return res.status(err.status || 502).json({
-      error: err?.expose && err.message ? err.message : "Failed to fetch metals summary",
-    });
   }
+
+  throw new Error(`FX rate not available for ${currency}`);
 }
 
-/* ------------------------ GET /metals/chart ------------------------ */
-/**
- * Query:
- *   symbol=XAU/USD
- *   range=1d|2d|3d|7d|14d|30d  (also accepts 1w/2w)
- */
-export async function getChart(req, res) {
+// Conversion
+function convertCandle(candle, rate) {
+  if (!candle) return null;
+
+  return {
+    ...candle,
+    o: toNum(candle.o) !== null ? candle.o * rate : null,
+    h: toNum(candle.h) !== null ? candle.h * rate : null,
+    l: toNum(candle.l) !== null ? candle.l * rate : null,
+    c: toNum(candle.c) !== null ? candle.c * rate : null,
+    volume: candle.volume ?? null,
+  };
+}
+
+function convertCandles(candles, rate) {
+  if (!Array.isArray(candles)) return [];
+  if (rate === 1) return candles;
+
+  return candles.map(c => convertCandle(c, rate)).filter(Boolean);
+}
+
+// 24h change
+function find24hReferenceCandle(candles, latestTimestamp) {
+  if (
+    !Array.isArray(candles) ||
+    candles.length < 2 ||
+    !Number.isFinite(latestTimestamp)
+  ) return null;
+
+  const target = latestTimestamp - DAY_MS;
+  let reference = null;
+
+  for (const candle of candles) {
+    if (!Number.isFinite(candle?.t)) continue;
+    if (candle.t > target) break;
+    reference = candle;
+  }
+
+  return reference;
+}
+
+function calculate24hChange(latest, candles) {
+  const current = Number(latest?.c);
+  if (!latest || !Number.isFinite(current) || current <= 0) {
+    return { change24hPct: null, change24h: null };
+  }
+
+  const previous = Number(
+    find24hReferenceCandle(candles, latest.t)?.c
+  );
+
+  if (!Number.isFinite(previous) || previous <= 0) {
+    return { change24hPct: null, change24h: null };
+  }
+
+  const pct = ((current - previous) / previous) * 100;
+  return { change24hPct: pct, change24h: pct / 100 };
+}
+
+function buildSummaryRow(symbol, currency, candles) {
+  const latest = candles?.length ? candles[candles.length - 1] : null;
+
+  if (!latest) {
+    return {
+      symbol: `${symbol}/${currency}`,
+      base: symbol,
+      currency,
+      price: null,
+      priceUsd: null,
+      change: null,
+      percentChange: null,
+      change24h: null,
+      change24hPct: null,
+      open: null,
+      high: null,
+      low: null,
+      previousClose: null,
+      datetime: null,
+      timestamp: null,
+      updatedAt: null,
+      provider: "firebase",
+      source: "marketData",
+    };
+  }
+
+  const price = toNum(latest.c);
+  const timestamp = Number.isFinite(latest.t) ? latest.t : null;
+  const { change24hPct, change24h } =
+    calculate24hChange(latest, candles);
+
+  const iso = timestamp !== null
+    ? new Date(timestamp).toISOString()
+    : null;
+
+  return {
+    symbol: `${symbol}/${currency}`,
+    base: symbol,
+    currency,
+    price,
+    priceUsd: currency === "USD" ? price : null,
+    change: change24hPct,
+    percentChange: change24hPct,
+    change24hPct,
+    change24h,
+    open: toNum(latest.o),
+    high: toNum(latest.h),
+    low: toNum(latest.l),
+    previousClose: null,
+    datetime: iso,
+    timestamp,
+    updatedAt: iso,
+    provider: "firebase",
+    source: "marketData",
+  };
+}
+
+// GET /metals/summary
+export async function getSummary(req, res, next) {
   try {
-    if (!API_KEY) {
-      return res.status(500).json({ error: "Server is not configured with API_NINJA_API_KEY" });
-    }
+    const rawBase = norm(req.query.base);
+    const base = {
+      GOLD: "XAU",
+      SILVER: "XAG",
+    }[rawBase] || rawBase || null;
 
-    const { symbol, name } = parseSymbol(req.query.symbol || "XAU/USD");
-    const range = (req.query.range || "30d").toLowerCase();
-
-    const { period, start, end } = rangeToHistoricalParams(range);
-
-    const hist = await ninjaGet("/commoditypricehistorical", {
-      name,
-      period,
-      start,
-      end,
-    });
-
-    // Normalize possible array/object shapes
-    const values = Array.isArray(hist) ? hist : Array.isArray(hist?.prices) ? hist.prices : [];
-
-    // Map and sort ascending; guard for dupes by time
-    const map = new Map();
-    for (const v of values) {
-      const tsec = Number(v?.time);
-      if (!Number.isFinite(tsec)) continue;
-      map.set(tsec, {
-        t: toISOFromUnix(tsec),
-        o: toNum(v?.open),
-        h: toNum(v?.high),
-        l: toNum(v?.low),
-        c: toNum(v?.close ?? v?.price),
+    if (base && !SUPPORTED_SYMBOLS.has(base)) {
+      return res.status(400).json({
+        error: `Unsupported metal symbol: ${base}. Supported symbols: XAU, XAG.`,
+        supportedSymbols: [...SUPPORTED_SYMBOLS],
       });
     }
-    const points = Array.from(map.keys())
-      .sort((a, b) => a - b)
-      .map((k) => map.get(k));
+
+    const currency = normCurrency(req.query.currency);
+    const symbols = base ? [base] : [...SUPPORTED_SYMBOLS];
+
+    const usdData = await Promise.all(
+      symbols.map(async symbol => ({
+        symbol,
+        candles: await getMarketData(symbol),
+      }))
+    );
+
+    const rate = await getUsdToFiatRate(currency);
+
+    const items = usdData.map(({ symbol, candles }) =>
+      buildSummaryRow(
+        symbol,
+        currency,
+        convertCandles(candles, rate)
+      )
+    );
+
+    const latestTimestamp = items.reduce(
+      (latest, item) =>
+        Number.isFinite(item.timestamp) &&
+        (latest === null || item.timestamp > latest)
+          ? item.timestamp
+          : latest,
+      null
+    );
 
     return res.json({
-      symbol,
-      interval: period, // expose chosen period for debugging
-      range,
-      points,
+      updatedAt: latestTimestamp !== null
+        ? new Date(latestTimestamp).toISOString()
+        : new Date().toISOString(),
+      currency,
+      provider: "firebase",
+      source: "marketData",
+      symbols,
+      items,
     });
-  } catch (err) {
-    console.error("[/metals/chart] error:", err);
-    return res.status(err.status || 502).json({
-      error: err?.expose && err.message ? err.message : "Failed to fetch metals chart from API Ninjas",
+  } catch (error) {
+    console.error("[/metals/summary] Firebase error:", error);
+    next(error);
+  }
+}
+
+// GET /metals/chart
+export async function getChart(req, res, next) {
+  try {
+    const requestedSymbol = req.query.symbol || "XAU/USD";
+    const { symbol } = parseSymbol(requestedSymbol);
+
+    const requestedCurrency = norm(
+      req.query.currency ||
+      String(requestedSymbol).split("/")[1] ||
+      "USD"
+    );
+
+    const rawRange = String(req.query.range || "30d")
+      .trim().toLowerCase();
+
+    const rawInterval = String(req.query.interval || "auto")
+      .trim().toLowerCase();
+
+    if (!SUPPORTED_SYMBOLS.has(symbol)) {
+      return res.status(400).json({
+        error: `Unsupported metal symbol: ${symbol}. Supported symbols: XAU, XAG.`,
+        symbol,
+        supportedSymbols: [...SUPPORTED_SYMBOLS],
+      });
+    }
+
+    if (!SUPPORTED_CURRENCIES.has(requestedCurrency)) {
+      return res.status(400).json({
+        error:
+          `Unsupported currency: ${requestedCurrency}. ` +
+          `Supported currencies: USD, EUR, GBP.`,
+        currency: requestedCurrency,
+        supportedCurrencies: [...SUPPORTED_CURRENCIES],
+      });
+    }
+
+    const days = parseRangeToDays(rawRange);
+    const endMs = Date.now();
+    const startMs = endMs - days * DAY_MS;
+    const intervalMs = intervalToMilliseconds(rawInterval, days);
+
+    const usdCandles = await getMarketData(symbol);
+    const rawUsdCandles = getCandlesInRange(
+      usdCandles,
+      startMs,
+      endMs
+    );
+
+    const baseResponse = {
+      symbol: `${symbol}/${requestedCurrency}`,
+      base: symbol,
+      currency: requestedCurrency,
+      interval: rawInterval,
+      range: rawRange,
+      days,
+      provider: "firebase",
+      source: "marketData",
+    };
+
+    if (!rawUsdCandles.length) {
+      return res.json({
+        ...baseResponse,
+        candles: [],
+        count: 0,
+        rawCount: 0,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const rate = await getUsdToFiatRate(requestedCurrency);
+
+    const candles = downsampleCandles(
+      convertCandles(rawUsdCandles, rate),
+      intervalMs
+    ).slice(-MAX_POINTS);
+
+    const latest = candles.at(-1);
+
+    return res.json({
+      ...baseResponse,
+      candles,
+      count: candles.length,
+      rawCount: rawUsdCandles.length,
+      updatedAt: Number.isFinite(latest?.t)
+        ? new Date(latest.t).toISOString()
+        : new Date().toISOString(),
     });
+  } catch (error) {
+    console.error("[/metals/chart] Firebase error:", error);
+    next(error);
   }
 }
