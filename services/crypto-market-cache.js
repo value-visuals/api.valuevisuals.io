@@ -6,7 +6,7 @@ const SUPPORTED_SYMBOLS = new Set(["BTC", "ETH", "XMR"]);
 const SUPPORTED_CURRENCIES = new Set(["USD", "EUR", "GBP"]);
 const MAX_POINTS = 10000;
 const CACHE_TTL_MS =
-  Number(process.env.CRYPTO_MARKET_CACHE_TTL_SECONDS || 30) * 1000;
+  Number(process.env.CRYPTO_MARKET_CACHE_TTL_SECONDS || 900) * 1000;
 
 const marketCache = new Map();
 
