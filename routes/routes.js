@@ -35,9 +35,9 @@ router.get("/volunteers", c.listVolunteers);
 router.post("/volunteers/apply", upload.single("resume"), c.applyVolunteer);
 
 // ✅ Crypto (auth-protected)
-router.get("/crypto/global", requireAuth, crypto.getGlobal);
-router.get("/crypto/summary", requireAuth, crypto.getSummary);
-router.get("/crypto/chart", requireAuth, crypto.getChart);
+router.get("/crypto/global", requireAuth, crypto.getFirebaseGlobal);
+router.get("/crypto/summary", requireAuth, crypto.getFirebaseSummary);
+router.get("/crypto/chart", requireAuth, crypto.getFirebaseChart);
 
 // ✅ Polymarket (auth-protected)
 router.get('/polymarket/bitcoin', requireAuth, getPolymarketBitcoin);
