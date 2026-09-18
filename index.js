@@ -8,7 +8,8 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import routes from "./routes/routes.js";
 import { notFound, errorHandler } from "./middlewares/error.js";
-import { preloadMarketData } from "./services/crypto-market-cache.js";
+import { preloadCryptoMarketData } from "./services/crypto-market-cache.js";
+import { preloadMetalsMarketData } from "./services/metals-market-cache.js";
 
 const app = express();
 const PORT = Number(process.env.PORT || 5015);
@@ -39,16 +40,6 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: Number(process.env.RATE_LIMIT_MAX || 300),
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.get("do-connecting-ip") || req.ip,
-  validate: { xForwardedForHeader: false },
-});
-
-app.use("/api", apiLimiter);
 app.use("/api", routes);
 app.use(notFound);
 app.use(errorHandler);
@@ -56,7 +47,11 @@ app.use(errorHandler);
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 
-  preloadMarketData()
+  preloadCryptoMarketData()
     .then(() => console.log("[crypto-market-cache] Initial market cache preload complete"))
     .catch((error) => console.error("[crypto-market-cache] Initial market cache preload failed:", error));
+
+  preloadMetalsMarketData()
+    .then(() => console.log("[metals-market-cache] Initial market cache preload complete"))
+    .catch((error) => console.error("[metals-market-cache] Initial market cache preload failed:", error));
 });

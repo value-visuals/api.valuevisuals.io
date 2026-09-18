@@ -746,7 +746,7 @@ export function getMarketCacheStatus() {
 /**
  * Preload XAU and XAG.
  */
-export async function preloadMarketData() {
+export async function preloadMetalsMarketData() {
   for (
     const symbol of SUPPORTED_SYMBOLS
   ) {
