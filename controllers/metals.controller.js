@@ -165,6 +165,7 @@ function find24hReferenceCandle(candles, latestTimestamp) {
 
 function calculate24hChange(latest, candles) {
   const current = Number(latest?.c);
+
   if (!latest || !Number.isFinite(current) || current <= 0) {
     return { change24hPct: null, change24h: null };
   }
@@ -181,6 +182,59 @@ function calculate24hChange(latest, candles) {
   return { change24hPct: pct, change24h: pct / 100 };
 }
 
+function calculate7dChange(latestCandle, candles) {
+  if (
+    !latestCandle ||
+    !Array.isArray(candles) ||
+    candles.length < 2
+  ) {
+    return null;
+  }
+
+  const currentPrice = Number(latestCandle?.c);
+  const latestTimestamp = Number(latestCandle?.t);
+
+  if (
+    !Number.isFinite(currentPrice) ||
+    currentPrice <= 0 ||
+    !Number.isFinite(latestTimestamp)
+  ) {
+    return null;
+  }
+
+  const targetTimestamp =
+    latestTimestamp - (7 * DAY_MS);
+
+  let referenceCandle = null;
+
+  for (const candle of candles) {
+    const timestamp = Number(candle?.t);
+
+    if (!Number.isFinite(timestamp)) continue;
+
+    if (timestamp > targetTimestamp) {
+      break;
+    }
+
+    referenceCandle = candle;
+  }
+
+  const referencePrice =
+    Number(referenceCandle?.c);
+
+  if (
+    !Number.isFinite(referencePrice) ||
+    referencePrice <= 0
+  ) {
+    return null;
+  }
+
+  return (
+    (currentPrice - referencePrice) /
+    referencePrice
+  ) * 100;
+}
+
 function buildSummaryRow(symbol, currency, candles) {
   const latest = candles?.length ? candles[candles.length - 1] : null;
 
@@ -195,6 +249,7 @@ function buildSummaryRow(symbol, currency, candles) {
       percentChange: null,
       change24h: null,
       change24hPct: null,
+      change7dPct: null,
       open: null,
       high: null,
       low: null,
@@ -212,6 +267,9 @@ function buildSummaryRow(symbol, currency, candles) {
   const { change24hPct, change24h } =
     calculate24hChange(latest, candles);
 
+  const change7dPct =
+    calculate7dChange(latest, candles);
+
   const iso = timestamp !== null
     ? new Date(timestamp).toISOString()
     : null;
@@ -226,6 +284,7 @@ function buildSummaryRow(symbol, currency, candles) {
     percentChange: change24hPct,
     change24hPct,
     change24h,
+    change7dPct,
     open: toNum(latest.o),
     high: toNum(latest.h),
     low: toNum(latest.l),
@@ -312,10 +371,10 @@ export async function getChart(req, res, next) {
     );
 
     const rawRange = String(req.query.range || "30d")
-      .trim().toLowerCase();
+        .trim().toLowerCase();
 
     const rawInterval = String(req.query.interval || "auto")
-      .trim().toLowerCase();
+        .trim().toLowerCase();
 
     if (!SUPPORTED_SYMBOLS.has(symbol)) {
       return res.status(400).json({
@@ -342,10 +401,10 @@ export async function getChart(req, res, next) {
 
     const usdCandles = await getMarketData(symbol);
     const rawUsdCandles = getCandlesInRange(
-      usdCandles,
-      startMs,
-      endMs
-    );
+        usdCandles,
+        startMs,
+        endMs
+      );
 
     const baseResponse = {
       symbol: `${symbol}/${requestedCurrency}`,
@@ -371,9 +430,9 @@ export async function getChart(req, res, next) {
     const rate = await getUsdToFiatRate(requestedCurrency);
 
     const candles = downsampleCandles(
-      convertCandles(rawUsdCandles, rate),
-      intervalMs
-    ).slice(-MAX_POINTS);
+        convertCandles(rawUsdCandles, rate),
+        intervalMs
+      ).slice(-MAX_POINTS);
 
     const latest = candles.at(-1);
 

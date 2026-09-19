@@ -287,7 +287,7 @@ export function getMarketCacheStatus() {
   }));
 }
 
-export async function preloadMarketData() {
+export async function preloadCryptoMarketData() {
   for (const symbol of SUPPORTED_SYMBOLS) {
     for (const currency of SUPPORTED_CURRENCIES) {
       try {

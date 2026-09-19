@@ -1,8 +1,4 @@
-import {
-  getMarketData,
-  getCandlesInRange,
-  downsampleCandles,
-} from "../services/crypto-market-cache.js";
+import { getMarketData, getCandlesInRange, downsampleCandles } from "../services/crypto-market-cache.js";
 
 const SUPPORTED_SYMBOLS = new Set(["BTC", "ETH", "XMR"]);
 const SUPPORTED_CURRENCIES = new Set(["USD", "EUR", "GBP"]);
@@ -17,13 +13,10 @@ function normCurrency(value) {
 }
 
 function parseRangeToDays(range) {
-  const match = String(range || "30d").trim().toLowerCase()
-    .match(/^(\d+(?:\.\d+)?)\s*([dwmy])$/);
+  const match = String(range || "30d").trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([dwmy])$/);
   if (!match) return 30;
-
   const amount = Number(match[1]);
   if (!Number.isFinite(amount) || amount <= 0) return 30;
-
   return amount * ({ d: 1, w: 7, m: 30, y: 365 }[match[2]] || 1);
 }
 
@@ -52,9 +45,7 @@ function intervalToMilliseconds(interval, days) {
 }
 
 function find24hReferenceCandle(candles, latestTimestamp) {
-  if (!Array.isArray(candles) || candles.length < 2 || !Number.isFinite(latestTimestamp)) {
-    return null;
-  }
+  if (!Array.isArray(candles) || candles.length < 2 || !Number.isFinite(latestTimestamp)) return null;
 
   const target = latestTimestamp - DAY_MS;
   let reference = null;
@@ -70,13 +61,13 @@ function find24hReferenceCandle(candles, latestTimestamp) {
 
 function calculate24hChange(latestCandle, candles) {
   const currentPrice = Number(latestCandle?.c);
+
   if (!latestCandle || !Number.isFinite(currentPrice) || currentPrice <= 0) {
     return { change24hPct: null, change24h: null };
   }
 
-  const previousPrice = Number(
-    find24hReferenceCandle(candles, latestCandle.t)?.c
-  );
+  const previousPrice = Number(find24hReferenceCandle(candles, latestCandle.t)?.c);
+
   if (!Number.isFinite(previousPrice) || previousPrice <= 0) {
     return { change24hPct: null, change24h: null };
   }
@@ -85,10 +76,39 @@ function calculate24hChange(latestCandle, candles) {
   return { change24hPct, change24h: change24hPct / 100 };
 }
 
+/**
+ * Calculate the percentage price change over the previous 7 days.
+ *
+ * This intentionally remains separate from the existing 24h calculation.
+ * The reference candle is the latest candle at or before the timestamp
+ * exactly 7 days before the latest available candle.
+ */
+function calculate7dChange(latestCandle, candles) {
+  if (!latestCandle || !Array.isArray(candles) || candles.length < 2) return null;
+
+  const currentPrice = Number(latestCandle?.c);
+  const latestTimestamp = Number(latestCandle?.t);
+
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0 || !Number.isFinite(latestTimestamp)) return null;
+
+  const targetTimestamp = latestTimestamp - (7 * DAY_MS);
+  let referenceCandle = null;
+
+  for (const candle of candles) {
+    const timestamp = Number(candle?.t);
+    if (!Number.isFinite(timestamp)) continue;
+    if (timestamp > targetTimestamp) break;
+    referenceCandle = candle;
+  }
+
+  const referencePrice = Number(referenceCandle?.c);
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return null;
+
+  return ((currentPrice - referencePrice) / referencePrice) * 100;
+}
+
 function buildSummaryRow(symbol, currency, candles) {
-  const latestCandle = Array.isArray(candles) && candles.length
-    ? candles[candles.length - 1]
-    : null;
+  const latestCandle = Array.isArray(candles) && candles.length ? candles[candles.length - 1] : null;
 
   if (!latestCandle) {
     return {
@@ -101,6 +121,7 @@ function buildSummaryRow(symbol, currency, candles) {
       volume24hUsd: null,
       change24hPct: null,
       change24h: null,
+      change7dPct: null,
       provider: "firebase",
       source: "marketData",
       currency,
@@ -115,6 +136,7 @@ function buildSummaryRow(symbol, currency, candles) {
   const marketCap = Number.isFinite(marketCapValue) ? marketCapValue : null;
   const volume24h = Number.isFinite(volumeValue) ? volumeValue : null;
   const { change24hPct, change24h } = calculate24hChange(latestCandle, candles);
+  const change7dPct = calculate7dChange(latestCandle, candles);
   const timestamp = Number.isFinite(latestCandle.t) ? latestCandle.t : null;
 
   return {
@@ -127,6 +149,7 @@ function buildSummaryRow(symbol, currency, candles) {
     volume24hUsd: currency === "USD" ? volume24h : null,
     change24hPct,
     change24h,
+    change7dPct,
     provider: "firebase",
     source: "marketData",
     currency,
@@ -142,47 +165,42 @@ export async function getFirebaseGlobal(req, res, next) {
 
     const results = await Promise.all(symbols.map(async symbol => {
       const candles = await getMarketData(symbol, currency);
-      const latest = Array.isArray(candles) && candles.length
-        ? candles[candles.length - 1]
-        : null;
+      const latest = Array.isArray(candles) && candles.length ? candles[candles.length - 1] : null;
 
       return {
         symbol,
-        marketCap: Number.isFinite(Number(latest?.marketCap))
-          ? Number(latest.marketCap)
-          : null,
-        volume24h: Number.isFinite(Number(latest?.volume))
-          ? Number(latest.volume)
-          : null,
+        marketCap: Number.isFinite(Number(latest?.marketCap)) ? Number(latest.marketCap) : null,
+        volume24h: Number.isFinite(Number(latest?.volume)) ? Number(latest.volume) : null,
         timestamp: Number.isFinite(latest?.t) ? latest.t : null,
       };
     }));
 
-    let marketCap = 0, volume24h = 0;
-    let hasMarketCap = false, hasVolume = false, latestTimestamp = null;
+    let marketCap = 0;
+    let volume24h = 0;
+    let hasMarketCap = false;
+    let hasVolume = false;
+    let latestTimestamp = null;
 
     for (const asset of results) {
       if (Number.isFinite(asset.marketCap)) {
         marketCap += asset.marketCap;
         hasMarketCap = true;
       }
+
       if (Number.isFinite(asset.volume24h)) {
         volume24h += asset.volume24h;
         hasVolume = true;
       }
-      if (
-        Number.isFinite(asset.timestamp) &&
-        (latestTimestamp === null || asset.timestamp > latestTimestamp)
-      ) {
+
+      if (Number.isFinite(asset.timestamp) && (latestTimestamp === null || asset.timestamp > latestTimestamp)) {
         latestTimestamp = asset.timestamp;
       }
     }
 
     const btc = results.find(asset => asset.symbol === "BTC");
-    const btcDominancePct =
-      Number.isFinite(btc?.marketCap) && btc.marketCap > 0 && marketCap > 0
-        ? (btc.marketCap / marketCap) * 100
-        : null;
+    const btcDominancePct = Number.isFinite(btc?.marketCap) && btc.marketCap > 0 && marketCap > 0
+      ? (btc.marketCap / marketCap) * 100
+      : null;
 
     return res.json({
       marketCap: hasMarketCap ? marketCap : null,
@@ -195,9 +213,7 @@ export async function getFirebaseGlobal(req, res, next) {
       source: "marketData",
       symbols,
       assets: results,
-      updatedAt: latestTimestamp !== null
-        ? new Date(latestTimestamp).toISOString()
-        : new Date().toISOString(),
+      updatedAt: latestTimestamp !== null ? new Date(latestTimestamp).toISOString() : new Date().toISOString(),
     });
   } catch (error) {
     console.error("[crypto-fb] Failed to load Firebase crypto global data:", error);
@@ -208,16 +224,14 @@ export async function getFirebaseGlobal(req, res, next) {
 export async function getFirebaseSummary(req, res, next) {
   try {
     const currency = normCurrency(req.query.currency || "USD");
-    const symbols = (req.query.symbols || "BTC,ETH,XMR")
-      .toString()
-      .split(",")
-      .map(norm)
-      .filter(Boolean);
-
+    const symbols = (req.query.symbols || "BTC,ETH,XMR").toString().split(",").map(norm).filter(Boolean);
     const unsupported = symbols.filter(symbol => !SUPPORTED_SYMBOLS.has(symbol));
+
     if (unsupported.length) {
       return res.status(400).json({
-        error: `Unsupported Firebase crypto symbol(s): ${unsupported.join(", ")}. Supported symbols: ${[...SUPPORTED_SYMBOLS].join(", ")}.`,
+        error:
+          `Unsupported Firebase crypto symbol(s): ${unsupported.join(", ")}. ` +
+          `Supported symbols: ${[...SUPPORTED_SYMBOLS].join(", ")}.`,
         symbols,
         supportedSymbols: [...SUPPORTED_SYMBOLS],
       });
@@ -250,7 +264,9 @@ export async function getFirebaseChart(req, res, next) {
 
     if (!SUPPORTED_SYMBOLS.has(symbol)) {
       return res.status(400).json({
-        error: `Unsupported Firebase crypto symbol: ${symbol}. Supported symbols: BTC, ETH, XMR.`,
+        error:
+          `Unsupported Firebase crypto symbol: ${symbol}. ` +
+          `Supported symbols: BTC, ETH, XMR.`,
         symbol,
         supportedSymbols: [...SUPPORTED_SYMBOLS],
       });
@@ -258,7 +274,9 @@ export async function getFirebaseChart(req, res, next) {
 
     if (!SUPPORTED_CURRENCIES.has(currency)) {
       return res.status(400).json({
-        error: `Unsupported crypto currency: ${currency}. Supported currencies: USD, EUR, GBP.`,
+        error:
+          `Unsupported crypto currency: ${currency}. ` +
+          `Supported currencies: USD, EUR, GBP.`,
         currency,
         supportedCurrencies: [...SUPPORTED_CURRENCIES],
       });
