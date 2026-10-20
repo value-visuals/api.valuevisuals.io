@@ -1,4 +1,8 @@
 .env
-package-lock.json
-node_modules
+.env.*
+*.env
+!.env.example
+node_modules/
+coverage/
+.DS_Store
 firebase-service-account.json
