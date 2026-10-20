@@ -1,683 +1,149 @@
-// controllers/polymarket.controller.js
+// Public, bounded, read-only proxy for the five existing Polymarket asset routes.
+const GAMMA = "https://gamma-api.polymarket.com";
+const CLOB = "https://clob.polymarket.com";
+const ASSETS = {
+  bitcoin: { search: "bitcoin", pattern: /bitcoin|btc/i },
+  ethereum: { search: "ethereum", pattern: /ethereum|eth/i },
+  monero: { search: "monero", pattern: /monero|xmr/i },
+  gold: { search: "gold", pattern: /gold|xau/i },
+  silver: { search: "silver", pattern: /silver|xag/i },
+};
+const cache = new Map();
+const MAX_EVENT_LOOKUPS = 50;
+const MAX_MARKETS = 100;
+const MAX_CLOB_TOKENS = 100;
 
-// Public, read-only endpoints (no API key needed for reads)
-const GAMMA = 'https://gamma-api.polymarket.com';
-const CLOB  = 'https://clob.polymarket.com';
+async function fetchJson(url, options = {}) {
+  const { timeoutMs = 9000, ...request } = options;
+  const response = await fetch(url, {
+    ...request,
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { accept: "application/json", ...(request.headers || {}) },
+  });
+  if (!response.ok) throw Object.assign(new Error(`Upstream returned ${response.status}`), { status: 502, code: "UPSTREAM_UNAVAILABLE" });
+  return response.json();
+}
 
-/**
- * Abortable fetch with timeout (Node 18+).
- */
-async function fetchWithTimeout(resource, { timeoutMs = 12000, ...options } = {}) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+function getTokenIds(value) {
+  if (Array.isArray(value)) return value.filter(token => typeof token === "string" && /^\d+$/.test(token)).slice(0, 10);
+  if (typeof value !== "string") return [];
   try {
-    const res = await fetch(resource, { ...options, signal: controller.signal });
-    return res;
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return getTokenIds(parsed);
+  } catch { /* Comma separated legacy values */ }
+  return getTokenIds(value.split(",").map(v => v.trim()));
+}
+
+async function mapLimit(values, concurrency, callback) {
+  const results = new Array(values.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor++;
+      try { results[index] = await callback(values[index]); }
+      catch { results[index] = null; }
+    }
+  }));
+  return results;
+}
+
+async function queryMarket(asset, { limit, includeClosed, livePrices }) {
+  const { search, pattern } = ASSETS[asset];
+  const searchUrl = new URL(`${GAMMA}/public-search`);
+  searchUrl.searchParams.set("q", search);
+  searchUrl.searchParams.set("keep_closed_markets", includeClosed ? "1" : "0");
+  searchUrl.searchParams.set("limit_per_type", String(limit));
+  searchUrl.searchParams.set("search_tags", "0");
+  searchUrl.searchParams.set("search_profiles", "0");
+  searchUrl.searchParams.set("optimized", "1");
+  const result = await fetchJson(searchUrl);
+  const events = (Array.isArray(result?.events) ? result.events : []).filter(e => typeof e?.slug === "string" && e.slug.length <= 200).slice(0, Math.min(limit, MAX_EVENT_LOOKUPS));
+  const hydrated = await mapLimit(events, 5, async e => fetchJson(`${GAMMA}/events/slug/${encodeURIComponent(e.slug)}`));
+  const markets = [];
+  for (const event of hydrated) {
+    if (!Array.isArray(event?.markets)) continue;
+    for (const market of event.markets) {
+      if (!includeClosed && (market.closed || market.active === false)) continue;
+      if (!pattern.test(String(market.question ?? "")) && !pattern.test(String(market.slug ?? ""))) continue;
+      if (typeof market.slug !== "string" || market.slug.length > 200) continue;
+      markets.push({
+        eventSlug: event.slug,
+        marketSlug: market.slug,
+        question: market.question ?? null,
+        outcomes: market.outcomes ?? null,
+        gammaOutcomePrices: market.outcomePrices ?? null,
+        clobTokenIds: getTokenIds(market.clobTokenIds),
+        livePrices: null,
+        volume24hr: market.volume24hr ?? null,
+        liquidity: market.liquidity ?? null,
+        endDate: market.endDate ?? null,
+        url: `https://polymarket.com/market/${encodeURIComponent(market.slug)}`,
+      });
+      if (markets.length >= MAX_MARKETS) break;
+    }
+    if (markets.length >= MAX_MARKETS) break;
+  }
+  if (livePrices) {
+    const tokenIds = [...new Set(markets.flatMap(m => m.clobTokenIds))].slice(0, MAX_CLOB_TOKENS);
+    if (tokenIds.length) {
+      try {
+        const params = tokenIds.flatMap(token_id => [{ token_id, side: "BUY" }, { token_id, side: "SELL" }]);
+        const live = await fetchJson(`${CLOB}/prices`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ params }) });
+        for (const market of markets) {
+          const prices = {};
+          for (const token of market.clobTokenIds) {
+            if (live?.[token]) prices[token] = { buy: live[token].BUY ?? null, sell: live[token].SELL ?? null };
+          }
+          market.livePrices = Object.keys(prices).length ? prices : null;
+        }
+      } catch (error) {
+        console.warn(`[polymarket] Live prices unavailable for ${asset}:`, error?.message);
+      }
+    }
+  }
+  return { count: markets.length, data: markets };
+}
+
+async function serve(asset, req, res) {
+  const input = req.query.limit ?? "10";
+  if (typeof input !== "string" || !/^\d{1,2}$/.test(input) || Number(input) < 1 || Number(input) > 50) {
+    return res.status(400).json({ error: "limit must be between 1 and 50", code: "INVALID_LIMIT" });
+  }
+  const limit = Number(input);
+  const includeClosed = req.query.includeClosed === "1";
+  const livePrices = req.query.livePrices === "1";
+  const key = `${asset}:${limit}:${includeClosed}:${livePrices}`;
+  const entry = cache.get(key);
+  const now = Date.now();
+  // Live prices are also cached briefly, protecting third-party API quotas.
+  if (entry?.value && entry.expiresAt > now) {
+    res.set("Cache-Control", `public, max-age=${livePrices ? 5 : 30}`);
+    return res.json(entry.value);
+  }
+  try {
+    const request = entry?.loading || queryMarket(asset, { limit, includeClosed, livePrices });
+    cache.set(key, { ...entry, loading: request, expiresAt: entry?.expiresAt ?? 0 });
+    const value = await request;
+    cache.set(key, { value, expiresAt: Date.now() + (livePrices ? 5000 : 30000), loading: null });
+    // Keep memory bounded even under many query combinations.
+    if (cache.size > 200) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+    }
+    res.set("Cache-Control", `public, max-age=${livePrices ? 5 : 30}`);
+    return res.json(value);
+  } catch (error) {
+    if (entry?.value) return res.json(entry.value); // Last good result on upstream outage
+    console.error(`[polymarket] ${asset} unavailable:`, error?.message);
+    return res.status(502).json({ error: "Polymarket data temporarily unavailable", code: "UPSTREAM_UNAVAILABLE" });
   } finally {
-    clearTimeout(t);
+    const current = cache.get(key);
+    if (current?.loading && current.loading === entry?.loading) current.loading = null;
   }
 }
 
-function parseClobTokenIds(s) {
-  if (!s) return [];
-  return String(s)
-    .split(',')
-    .map(x => x.trim())
-    .filter(Boolean);
-}
-
-/**
- * GET /polymarket/bitcoin
- * Query params:
- *  - limit=10 (max 50)
- *  - includeClosed=1 (include closed/inactive markets)
- *  - livePrices=1 (attach best bid/ask via CLOB)
- */
-export async function getPolymarketBitcoin(req, res) {
-  try {
-    const limit = Math.min(parseInt(req.query.limit ?? '10', 10), 50);
-    const includeClosed = req.query.includeClosed === '1';
-    const livePrices = req.query.livePrices === '1';
-
-    // 1) Search events related to “bitcoin” (PUBLIC endpoint, no cookies needed)
-    const searchUrl = new URL(`${GAMMA}/public-search`);
-    searchUrl.searchParams.set('q', 'bitcoin');
-    searchUrl.searchParams.set('keep_closed_markets', includeClosed ? '1' : '0');
-    searchUrl.searchParams.set('limit_per_type', String(limit));
-    searchUrl.searchParams.set('search_tags', '0');
-    searchUrl.searchParams.set('search_profiles', '0');
-    searchUrl.searchParams.set('optimized', '1');
-
-    // optional, but helps certain CDNs: send basic headers
-    const commonHeaders = { 'accept': 'application/json', 'user-agent': 'node-fetch' };
-
-    const searchRes = await fetchWithTimeout(searchUrl, {
-    timeoutMs: 12000,
-    headers: commonHeaders
-    });
-    if (!searchRes.ok) {
-    const txt = await searchRes.text().catch(() => '');
-    throw new Error(`Gamma public-search failed: ${searchRes.status} ${txt}`);
-    }
-    const search = await searchRes.json();
-    const events = Array.isArray(search?.events) ? search.events.slice(0, limit) : [];
-
-    // 2) Hydrate each event to get markets
-    const hydrated = await Promise.all(
-      events.map(async (e) => {
-        const evRes = await fetchWithTimeout(
-          `${GAMMA}/events/slug/${encodeURIComponent(e.slug)}`,
-          { timeoutMs: 12000 }
-        );
-        if (!evRes.ok) return null;
-        return evRes.json();
-      })
-    );
-
-    // 3) Flatten + filter markets
-    const markets = [];
-    for (const ev of hydrated) {
-      if (!ev?.markets) continue;
-      for (const m of ev.markets) {
-        if (!includeClosed && (m.closed || m.active === false)) continue;
-
-        markets.push({
-          eventSlug: ev.slug,
-          marketId: m.id,
-          marketSlug: m.slug,
-          question: m.question,
-          outcomes: m.outcomes ?? null,
-          gammaOutcomePrices: m.outcomePrices ?? null, // often [YES, NO] probabilities 0..1
-          clobTokenIds: parseClobTokenIds(m.clobTokenIds),
-          volume24hr: m.volume24hr ?? null,
-          liquidity: m.liquidity ?? null,
-          endDate: m.endDate ?? null,
-        });
-      }
-    }
-
-    // Heuristic: keep obvious BTC markets
-    const btcMarkets = markets.filter(
-      (m) =>
-        /bitcoin|btc/i.test(m.question ?? '') ||
-        /bitcoin|btc/i.test(m.marketSlug ?? '')
-    );
-
-    // 4) (optional) attach live best bid/ask from CLOB
-    let data = btcMarkets;
-    if (livePrices && btcMarkets.some((m) => m.clobTokenIds.length)) {
-      const params = [];
-      for (const m of btcMarkets) {
-        for (const t of m.clobTokenIds) {
-          params.push({ token_id: t, side: 'BUY' });  // best ask (what you pay)
-          params.push({ token_id: t, side: 'SELL' }); // best bid (what you receive)
-        }
-      }
-
-      const clobRes = await fetchWithTimeout(`${CLOB}/prices`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ params }),
-        timeoutMs: 12000,
-      });
-
-      if (clobRes.ok) {
-        const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = btcMarkets.map((m) => {
-          const live = {};
-          for (const t of m.clobTokenIds) {
-            const p = priceMap?.[t];
-            if (p) live[t] = { buy: p.BUY ?? null, sell: p.SELL ?? null };
-          }
-          return { ...m, livePrices: Object.keys(live).length ? live : null };
-        });
-      }
-    }
-
-    // 5) normalize for frontend/consumers
-    const response = data.map((m) => ({
-      eventSlug: m.eventSlug,
-      marketSlug: m.marketSlug,
-      question: m.question,
-      outcomes: m.outcomes,                 // array of outcome labels
-      gammaOutcomePrices: m.gammaOutcomePrices, // usually [yesProb, noProb]
-      clobTokenIds: m.clobTokenIds,        // [YES_token, NO_token]
-      livePrices: m.livePrices ?? null,     // { tokenId: { buy, sell } }
-      volume24hr: m.volume24hr,
-      liquidity: m.liquidity,
-      endDate: m.endDate,
-      url: `https://polymarket.com/market/${m.marketSlug}`,
-    }));
-
-    res.set('Cache-Control', livePrices ? 'no-store' : 'public, max-age=30');
-    return res.json({ count: response.length, data: response });
-  } catch (err) {
-    console.error('Polymarket controller error:', err);
-    return res.status(500).json({ error: 'Failed to fetch Polymarket data' });
-  }
-}
-
-
-/**
- * GET /polymarket/ethereum
- * Query params:
- *  - limit=10 (max 50)
- *  - includeClosed=1 (include closed/inactive markets)
- *  - livePrices=1 (attach best bid/ask via CLOB)
- */
-export async function getPolymarketEthereum(req, res) {
-  try {
-    const limit = Math.min(parseInt(req.query.limit ?? '10', 10), 50);
-    const includeClosed = req.query.includeClosed === '1';
-    const livePrices = req.query.livePrices === '1';
-
-    // 1) Search events related to ethereum (PUBLIC endpoint, no cookies needed)
-    const searchUrl = new URL(`${GAMMA}/public-search`);
-    searchUrl.searchParams.set('q', 'ethereum');
-    searchUrl.searchParams.set('keep_closed_markets', includeClosed ? '1' : '0');
-    searchUrl.searchParams.set('limit_per_type', String(limit));
-    searchUrl.searchParams.set('search_tags', '0');
-    searchUrl.searchParams.set('search_profiles', '0');
-    searchUrl.searchParams.set('optimized', '1');
-
-    // optional, but helps certain CDNs: send basic headers
-    const commonHeaders = { 'accept': 'application/json', 'user-agent': 'node-fetch' };
-
-    const searchRes = await fetchWithTimeout(searchUrl, {
-    timeoutMs: 12000,
-    headers: commonHeaders
-    });
-    if (!searchRes.ok) {
-    const txt = await searchRes.text().catch(() => '');
-    throw new Error(`Gamma public-search failed: ${searchRes.status} ${txt}`);
-    }
-    const search = await searchRes.json();
-    const events = Array.isArray(search?.events) ? search.events.slice(0, limit) : [];
-
-    // 2) Hydrate each event to get markets
-    const hydrated = await Promise.all(
-      events.map(async (e) => {
-        const evRes = await fetchWithTimeout(
-          `${GAMMA}/events/slug/${encodeURIComponent(e.slug)}`,
-          { timeoutMs: 12000 }
-        );
-        if (!evRes.ok) return null;
-        return evRes.json();
-      })
-    );
-
-    // 3) Flatten + filter markets
-    const markets = [];
-    for (const ev of hydrated) {
-      if (!ev?.markets) continue;
-      for (const m of ev.markets) {
-        if (!includeClosed && (m.closed || m.active === false)) continue;
-
-        markets.push({
-          eventSlug: ev.slug,
-          marketId: m.id,
-          marketSlug: m.slug,
-          question: m.question,
-          outcomes: m.outcomes ?? null,
-          gammaOutcomePrices: m.outcomePrices ?? null, // often [YES, NO] probabilities 0..1
-          clobTokenIds: parseClobTokenIds(m.clobTokenIds),
-          volume24hr: m.volume24hr ?? null,
-          liquidity: m.liquidity ?? null,
-          endDate: m.endDate ?? null,
-        });
-      }
-    }
-
-    // Heuristic: keep obvious BTC markets
-    const ethMarkets = markets.filter(
-      (m) =>
-        /ethereum|eth/i.test(m.question ?? '') ||
-        /ethereum|eth/i.test(m.marketSlug ?? '')
-    );
-
-    // 4) (optional) attach live best bid/ask from CLOB
-    let data = ethMarkets;
-    if (livePrices && ethMarkets.some((m) => m.clobTokenIds.length)) {
-      const params = [];
-      for (const m of ethMarkets) {
-        for (const t of m.clobTokenIds) {
-          params.push({ token_id: t, side: 'BUY' });  // best ask (what you pay)
-          params.push({ token_id: t, side: 'SELL' }); // best bid (what you receive)
-        }
-      }
-
-      const clobRes = await fetchWithTimeout(`${CLOB}/prices`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ params }),
-        timeoutMs: 12000,
-      });
-
-      if (clobRes.ok) {
-        const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = ethMarkets.map((m) => {
-          const live = {};
-          for (const t of m.clobTokenIds) {
-            const p = priceMap?.[t];
-            if (p) live[t] = { buy: p.BUY ?? null, sell: p.SELL ?? null };
-          }
-          return { ...m, livePrices: Object.keys(live).length ? live : null };
-        });
-      }
-    }
-
-    // 5) normalize for frontend/consumers
-    const response = data.map((m) => ({
-      eventSlug: m.eventSlug,
-      marketSlug: m.marketSlug,
-      question: m.question,
-      outcomes: m.outcomes,                 // array of outcome labels
-      gammaOutcomePrices: m.gammaOutcomePrices, // usually [yesProb, noProb]
-      clobTokenIds: m.clobTokenIds,        // [YES_token, NO_token]
-      livePrices: m.livePrices ?? null,     // { tokenId: { buy, sell } }
-      volume24hr: m.volume24hr,
-      liquidity: m.liquidity,
-      endDate: m.endDate,
-      url: `https://polymarket.com/market/${m.marketSlug}`,
-    }));
-
-    res.set('Cache-Control', livePrices ? 'no-store' : 'public, max-age=30');
-    return res.json({ count: response.length, data: response });
-  } catch (err) {
-    console.error('Polymarket controller error:', err);
-    return res.status(500).json({ error: 'Failed to fetch Polymarket data' });
-  }
-}
-
-
-/**
- * GET /polymarket/monero
- * Query params:
- *  - limit=10 (max 50)
- *  - includeClosed=1 (include closed/inactive markets)
- *  - livePrices=1 (attach best bid/ask via CLOB)
- */
-export async function getPolymarketMonero(req, res) {
-  try {
-    const limit = Math.min(parseInt(req.query.limit ?? '10', 10), 50);
-    const includeClosed = req.query.includeClosed === '1';
-    const livePrices = req.query.livePrices === '1';
-
-    // 1) Search events related to monero (PUBLIC endpoint, no cookies needed)
-    const searchUrl = new URL(`${GAMMA}/public-search`);
-    searchUrl.searchParams.set('q', 'monero');
-    searchUrl.searchParams.set('keep_closed_markets', includeClosed ? '1' : '0');
-    searchUrl.searchParams.set('limit_per_type', String(limit));
-    searchUrl.searchParams.set('search_tags', '0');
-    searchUrl.searchParams.set('search_profiles', '0');
-    searchUrl.searchParams.set('optimized', '1');
-
-    // optional, but helps certain CDNs: send basic headers
-    const commonHeaders = { 'accept': 'application/json', 'user-agent': 'node-fetch' };
-
-    const searchRes = await fetchWithTimeout(searchUrl, {
-    timeoutMs: 12000,
-    headers: commonHeaders
-    });
-    if (!searchRes.ok) {
-    const txt = await searchRes.text().catch(() => '');
-    throw new Error(`Gamma public-search failed: ${searchRes.status} ${txt}`);
-    }
-    const search = await searchRes.json();
-    const events = Array.isArray(search?.events) ? search.events.slice(0, limit) : [];
-
-    // 2) Hydrate each event to get markets
-    const hydrated = await Promise.all(
-      events.map(async (e) => {
-        const evRes = await fetchWithTimeout(
-          `${GAMMA}/events/slug/${encodeURIComponent(e.slug)}`,
-          { timeoutMs: 12000 }
-        );
-        if (!evRes.ok) return null;
-        return evRes.json();
-      })
-    );
-
-    // 3) Flatten + filter markets
-    const markets = [];
-    for (const ev of hydrated) {
-      if (!ev?.markets) continue;
-      for (const m of ev.markets) {
-        if (!includeClosed && (m.closed || m.active === false)) continue;
-
-        markets.push({
-          eventSlug: ev.slug,
-          marketId: m.id,
-          marketSlug: m.slug,
-          question: m.question,
-          outcomes: m.outcomes ?? null,
-          gammaOutcomePrices: m.outcomePrices ?? null, // often [YES, NO] probabilities 0..1
-          clobTokenIds: parseClobTokenIds(m.clobTokenIds),
-          volume24hr: m.volume24hr ?? null,
-          liquidity: m.liquidity ?? null,
-          endDate: m.endDate ?? null,
-        });
-      }
-    }
-
-    // Heuristic: keep obvious BTC markets
-    const xmrMarkets = markets.filter(
-      (m) =>
-        /monero|xmr/i.test(m.question ?? '') ||
-        /monero|xmr/i.test(m.marketSlug ?? '')
-    );
-
-    // 4) (optional) attach live best bid/ask from CLOB
-    let data = xmrMarkets;
-    if (livePrices && xmrMarkets.some((m) => m.clobTokenIds.length)) {
-      const params = [];
-      for (const m of xmrMarkets) {
-        for (const t of m.clobTokenIds) {
-          params.push({ token_id: t, side: 'BUY' });  // best ask (what you pay)
-          params.push({ token_id: t, side: 'SELL' }); // best bid (what you receive)
-        }
-      }
-
-      const clobRes = await fetchWithTimeout(`${CLOB}/prices`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ params }),
-        timeoutMs: 12000,
-      });
-
-      if (clobRes.ok) {
-        const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = xmrMarkets.map((m) => {
-          const live = {};
-          for (const t of m.clobTokenIds) {
-            const p = priceMap?.[t];
-            if (p) live[t] = { buy: p.BUY ?? null, sell: p.SELL ?? null };
-          }
-          return { ...m, livePrices: Object.keys(live).length ? live : null };
-        });
-      }
-    }
-
-    // 5) normalize for frontend/consumers
-    const response = data.map((m) => ({
-      eventSlug: m.eventSlug,
-      marketSlug: m.marketSlug,
-      question: m.question,
-      outcomes: m.outcomes,                 // array of outcome labels
-      gammaOutcomePrices: m.gammaOutcomePrices, // usually [yesProb, noProb]
-      clobTokenIds: m.clobTokenIds,        // [YES_token, NO_token]
-      livePrices: m.livePrices ?? null,     // { tokenId: { buy, sell } }
-      volume24hr: m.volume24hr,
-      liquidity: m.liquidity,
-      endDate: m.endDate,
-      url: `https://polymarket.com/market/${m.marketSlug}`,
-    }));
-
-    res.set('Cache-Control', livePrices ? 'no-store' : 'public, max-age=30');
-    return res.json({ count: response.length, data: response });
-  } catch (err) {
-    console.error('Polymarket controller error:', err);
-    return res.status(500).json({ error: 'Failed to fetch Polymarket data' });
-  }
-}
-
-
-/**
- * GET /polymarket/gold
- * Query params:
- *  - limit=10 (max 50)
- *  - includeClosed=1 (include closed/inactive markets)
- *  - livePrices=1 (attach best bid/ask via CLOB)
- */
-export async function getPolymarketGold(req, res) {
-  try {
-    const limit = Math.min(parseInt(req.query.limit ?? '10', 10), 50);
-    const includeClosed = req.query.includeClosed === '1';
-    const livePrices = req.query.livePrices === '1';
-
-    // 1) Search events related to gold (PUBLIC endpoint, no cookies needed)
-    const searchUrl = new URL(`${GAMMA}/public-search`);
-    searchUrl.searchParams.set('q', 'gold');
-    searchUrl.searchParams.set('keep_closed_markets', includeClosed ? '1' : '0');
-    searchUrl.searchParams.set('limit_per_type', String(limit));
-    searchUrl.searchParams.set('search_tags', '0');
-    searchUrl.searchParams.set('search_profiles', '0');
-    searchUrl.searchParams.set('optimized', '1');
-
-    // optional, but helps certain CDNs: send basic headers
-    const commonHeaders = { 'accept': 'application/json', 'user-agent': 'node-fetch' };
-
-    const searchRes = await fetchWithTimeout(searchUrl, {
-    timeoutMs: 12000,
-    headers: commonHeaders
-    });
-    if (!searchRes.ok) {
-    const txt = await searchRes.text().catch(() => '');
-    throw new Error(`Gamma public-search failed: ${searchRes.status} ${txt}`);
-    }
-    const search = await searchRes.json();
-    const events = Array.isArray(search?.events) ? search.events.slice(0, limit) : [];
-
-    // 2) Hydrate each event to get markets
-    const hydrated = await Promise.all(
-      events.map(async (e) => {
-        const evRes = await fetchWithTimeout(
-          `${GAMMA}/events/slug/${encodeURIComponent(e.slug)}`,
-          { timeoutMs: 12000 }
-        );
-        if (!evRes.ok) return null;
-        return evRes.json();
-      })
-    );
-
-    // 3) Flatten + filter markets
-    const markets = [];
-    for (const ev of hydrated) {
-      if (!ev?.markets) continue;
-      for (const m of ev.markets) {
-        if (!includeClosed && (m.closed || m.active === false)) continue;
-
-        markets.push({
-          eventSlug: ev.slug,
-          marketId: m.id,
-          marketSlug: m.slug,
-          question: m.question,
-          outcomes: m.outcomes ?? null,
-          gammaOutcomePrices: m.outcomePrices ?? null, // often [YES, NO] probabilities 0..1
-          clobTokenIds: parseClobTokenIds(m.clobTokenIds),
-          volume24hr: m.volume24hr ?? null,
-          liquidity: m.liquidity ?? null,
-          endDate: m.endDate ?? null,
-        });
-      }
-    }
-
-    const goldMarkets = markets.filter(
-      (m) =>
-        /gold|xau/i.test(m.question ?? '') ||
-        /gold|xau/i.test(m.marketSlug ?? '')
-    );
-
-    // 4) (optional) attach live best bid/ask from CLOB
-    let data = goldMarkets;
-    if (livePrices && goldMarkets.some((m) => m.clobTokenIds.length)) {
-      const params = [];
-      for (const m of goldMarkets) {
-        for (const t of m.clobTokenIds) {
-          params.push({ token_id: t, side: 'BUY' });  // best ask (what you pay)
-          params.push({ token_id: t, side: 'SELL' }); // best bid (what you receive)
-        }
-      }
-
-      const clobRes = await fetchWithTimeout(`${CLOB}/prices`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ params }),
-        timeoutMs: 12000,
-      });
-
-      if (clobRes.ok) {
-        const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = goldMarkets.map((m) => {
-          const live = {};
-          for (const t of m.clobTokenIds) {
-            const p = priceMap?.[t];
-            if (p) live[t] = { buy: p.BUY ?? null, sell: p.SELL ?? null };
-          }
-          return { ...m, livePrices: Object.keys(live).length ? live : null };
-        });
-      }
-    }
-
-    // 5) normalize for frontend/consumers
-    const response = data.map((m) => ({
-      eventSlug: m.eventSlug,
-      marketSlug: m.marketSlug,
-      question: m.question,
-      outcomes: m.outcomes,                 // array of outcome labels
-      gammaOutcomePrices: m.gammaOutcomePrices, // usually [yesProb, noProb]
-      clobTokenIds: m.clobTokenIds,        // [YES_token, NO_token]
-      livePrices: m.livePrices ?? null,     // { tokenId: { buy, sell } }
-      volume24hr: m.volume24hr,
-      liquidity: m.liquidity,
-      endDate: m.endDate,
-      url: `https://polymarket.com/market/${m.marketSlug}`,
-    }));
-
-    res.set('Cache-Control', livePrices ? 'no-store' : 'public, max-age=30');
-    return res.json({ count: response.length, data: response });
-  } catch (err) {
-    console.error('Polymarket controller error:', err);
-    return res.status(500).json({ error: 'Failed to fetch Polymarket data' });
-  }
-}
-
-/**
- * GET /polymarket/silver
- * Query params:
- *  - limit=10 (max 50)
- *  - includeClosed=1 (include closed/inactive markets)
- *  - livePrices=1 (attach best bid/ask via CLOB)
- */
-export async function getPolymarketSilver(req, res) {
-  try {
-    const limit = Math.min(parseInt(req.query.limit ?? '10', 10), 50);
-    const includeClosed = req.query.includeClosed === '1';
-    const livePrices = req.query.livePrices === '1';
-
-    // 1) Search events related to ethereum (PUBLIC endpoint, no cookies needed)
-    const searchUrl = new URL(`${GAMMA}/public-search`);
-    searchUrl.searchParams.set('q', 'silver');
-    searchUrl.searchParams.set('keep_closed_markets', includeClosed ? '1' : '0');
-    searchUrl.searchParams.set('limit_per_type', String(limit));
-    searchUrl.searchParams.set('search_tags', '0');
-    searchUrl.searchParams.set('search_profiles', '0');
-    searchUrl.searchParams.set('optimized', '1');
-
-    // optional, but helps certain CDNs: send basic headers
-    const commonHeaders = { 'accept': 'application/json', 'user-agent': 'node-fetch' };
-
-    const searchRes = await fetchWithTimeout(searchUrl, {
-    timeoutMs: 12000,
-    headers: commonHeaders
-    });
-    if (!searchRes.ok) {
-    const txt = await searchRes.text().catch(() => '');
-    throw new Error(`Gamma public-search failed: ${searchRes.status} ${txt}`);
-    }
-    const search = await searchRes.json();
-    const events = Array.isArray(search?.events) ? search.events.slice(0, limit) : [];
-
-    // 2) Hydrate each event to get markets
-    const hydrated = await Promise.all(
-      events.map(async (e) => {
-        const evRes = await fetchWithTimeout(
-          `${GAMMA}/events/slug/${encodeURIComponent(e.slug)}`,
-          { timeoutMs: 12000 }
-        );
-        if (!evRes.ok) return null;
-        return evRes.json();
-      })
-    );
-
-    // 3) Flatten + filter markets
-    const markets = [];
-    for (const ev of hydrated) {
-      if (!ev?.markets) continue;
-      for (const m of ev.markets) {
-        if (!includeClosed && (m.closed || m.active === false)) continue;
-
-        markets.push({
-          eventSlug: ev.slug,
-          marketId: m.id,
-          marketSlug: m.slug,
-          question: m.question,
-          outcomes: m.outcomes ?? null,
-          gammaOutcomePrices: m.outcomePrices ?? null, // often [YES, NO] probabilities 0..1
-          clobTokenIds: parseClobTokenIds(m.clobTokenIds),
-          volume24hr: m.volume24hr ?? null,
-          liquidity: m.liquidity ?? null,
-          endDate: m.endDate ?? null,
-        });
-      }
-    }
-
-    const silverMarkets = markets.filter(
-      (m) =>
-        /gold|xau/i.test(m.question ?? '') ||
-        /gold|xau/i.test(m.marketSlug ?? '')
-    );
-
-    // 4) (optional) attach live best bid/ask from CLOB
-    let data = silverMarkets;
-    if (livePrices && silverMarkets.some((m) => m.clobTokenIds.length)) {
-      const params = [];
-      for (const m of silverMarkets) {
-        for (const t of m.clobTokenIds) {
-          params.push({ token_id: t, side: 'BUY' });  // best ask (what you pay)
-          params.push({ token_id: t, side: 'SELL' }); // best bid (what you receive)
-        }
-      }
-
-      const clobRes = await fetchWithTimeout(`${CLOB}/prices`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ params }),
-        timeoutMs: 12000,
-      });
-
-      if (clobRes.ok) {
-        const priceMap = await clobRes.json(); // { [token_id]: { BUY: "0.501", SELL: "0.498" } }
-        data = silverMarkets.map((m) => {
-          const live = {};
-          for (const t of m.clobTokenIds) {
-            const p = priceMap?.[t];
-            if (p) live[t] = { buy: p.BUY ?? null, sell: p.SELL ?? null };
-          }
-          return { ...m, livePrices: Object.keys(live).length ? live : null };
-        });
-      }
-    }
-
-    // 5) normalize for frontend/consumers
-    const response = data.map((m) => ({
-      eventSlug: m.eventSlug,
-      marketSlug: m.marketSlug,
-      question: m.question,
-      outcomes: m.outcomes,                 // array of outcome labels
-      gammaOutcomePrices: m.gammaOutcomePrices, // usually [yesProb, noProb]
-      clobTokenIds: m.clobTokenIds,        // [YES_token, NO_token]
-      livePrices: m.livePrices ?? null,     // { tokenId: { buy, sell } }
-      volume24hr: m.volume24hr,
-      liquidity: m.liquidity,
-      endDate: m.endDate,
-      url: `https://polymarket.com/market/${m.marketSlug}`,
-    }));
-
-    res.set('Cache-Control', livePrices ? 'no-store' : 'public, max-age=30');
-    return res.json({ count: response.length, data: response });
-  } catch (err) {
-    console.error('Polymarket controller error:', err);
-    return res.status(500).json({ error: 'Failed to fetch Polymarket data' });
-  }
-}
+export const getPolymarketBitcoin = (req, res) => serve("bitcoin", req, res);
+export const getPolymarketEthereum = (req, res) => serve("ethereum", req, res);
+export const getPolymarketMonero = (req, res) => serve("monero", req, res);
+export const getPolymarketGold = (req, res) => serve("gold", req, res);
+export const getPolymarketSilver = (req, res) => serve("silver", req, res);
