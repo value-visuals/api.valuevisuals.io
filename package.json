@@ -1,6 +1,6 @@
 {
   "name": "value-visuals-api",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Value Visuals API",
   "type": "module",
   "main": "index.js",
@@ -8,6 +8,7 @@
     "start": "NODE_ENV=production node index.js",
     "dev": "nodemon index.js",
     "lint": "eslint .",
+    "test": "node --test tests/*.test.js",
     "knip": "knip",
     "check": "npm run lint && npm run knip"
   },
