@@ -6,7 +6,6 @@ import { sendWelcomeEmail, sendVolunteerApplicationReceipt, notifyAdminOfVolunte
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
 const MIN_PASSWORD_LEN = Number(process.env.MIN_PASSWORD_LEN || 8);
 const ALLOWED_INTERESTS = new Set(["bitcoin", "ethereum", "gold", "silver"]);
-const AUTH_ERROR_MESSAGES = { EMAIL_NOT_FOUND: "No user found with that email", INVALID_PASSWORD: "Invalid password", USER_DISABLED: "User account is disabled" };
 
 // Health
 
@@ -22,17 +21,17 @@ export async function signup(req, res, next) {
 
     if (!isValidEmail(email)) return res.status(400).json({ error: "Valid email required" });
 
-    if (!password || password.length < MIN_PASSWORD_LEN) {
+    if (typeof password !== "string" || password.length < MIN_PASSWORD_LEN || password.length > 4096) {
       return res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LEN} characters` });
     }
 
-    const normalizedEmail = String(email).toLowerCase();
+    const normalizedEmail = String(email).trim().toLowerCase();
     const normalizedInterests = normalizeInterests(interests);
 
     const userRecord = await admin.auth().createUser({
       email: normalizedEmail,
       password,
-      displayName: displayName || undefined,
+      displayName: typeof displayName === "string" ? displayName.trim().slice(0, 100) : undefined,
       emailVerified: false,
       disabled: false,
     });
@@ -66,7 +65,7 @@ export async function signin(req, res, next) {
     const { email, password } = req.body || {};
 
     if (!isValidEmail(email)) return res.status(400).json({ error: "Valid email required" });
-    if (!password) return res.status(400).json({ error: "Password required" });
+    if (typeof password !== "string" || !password || password.length > 4096) return res.status(400).json({ error: "Password required" });
 
     if (!FIREBASE_WEB_API_KEY) {
       return res.status(500).json({ error: "Server missing FIREBASE_WEB_API_KEY config" });
@@ -75,6 +74,7 @@ export async function signin(req, res, next) {
     const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_WEB_API_KEY}`;
 
     const response = await fetch(url, {
+      signal: AbortSignal.timeout(10000),
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -88,7 +88,8 @@ export async function signin(req, res, next) {
 
     if (!response.ok) {
       const firebaseError = data?.error?.message || "Authentication failed";
-      return res.status(401).json({ error: AUTH_ERROR_MESSAGES[firebaseError] || firebaseError });
+      if (firebaseError === "USER_DISABLED") return res.status(403).json({ error: "Account disabled", code: "USER_DISABLED" });
+      return res.status(401).json({ error: "Invalid email or password", code: "INVALID_CREDENTIALS" });
     }
 
     return res.json({
@@ -261,8 +262,11 @@ export async function subscribe(req, res, next) {
     if (!email || typeof email !== "string") return res.status(400).json({ error: "Email is required" });
 
     const normalized = email.trim().toLowerCase();
+    if (!isValidEmail(normalized) || normalized.length > 254 || normalized.includes("/")) return res.status(400).json({ error: "Valid email required" });
 
-    await db.collection("subscribers").doc(normalized).set(
+    const subscriberRef = db.collection("subscribers").doc(normalized);
+    const existing = await subscriberRef.get();
+    await subscriberRef.set(
       {
         email: normalized,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -271,7 +275,10 @@ export async function subscribe(req, res, next) {
       { merge: true }
     );
 
-    void Promise.resolve(sendWelcomeEmail(normalized)).catch((err) => console.error("Welcome email failed:", err?.message || err));
+    if (!existing.exists || existing.data()?.subscribed !== true) {
+      void Promise.resolve().then(() => sendWelcomeEmail(normalized))
+        .catch((err) => console.error("Welcome email failed:", err?.message || err));
+    }
 
     return res.json({ message: `Saved: ${normalized}` });
   } catch (err) {
@@ -316,7 +323,7 @@ export async function addCareers(req, res, next) {
   try {
     const careers = Array.isArray(req.body) ? req.body : [req.body];
 
-    if (careers.length === 0) return res.status(400).json({ error: "No job postings provided" });
+    if (careers.length === 0 || careers.length > 25 || careers.some(job => !job || typeof job !== "object" || Array.isArray(job))) return res.status(400).json({ error: "Provide between 1 and 25 valid job postings" });
 
     const batch = db.batch();
     const careersRef = db.collection("careers");
@@ -367,8 +374,12 @@ export async function applyVolunteer(req, res, next) {
   try {
     const { firstName, middleName, lastName, phone, email, socials, jobId, jobTitle: jtRaw } = req.body || {};
 
-    if (!firstName || !lastName || !phone || !email) {
-      return res.status(400).json({ error: "firstName, lastName, phone, and email are required." });
+    if (
+      ![firstName, lastName, phone, email].every(value => typeof value === "string" && value.trim()) ||
+      !isValidEmail(email.trim()) || email.length > 254 || email.includes("/") ||
+      firstName.length > 100 || lastName.length > 100 || phone.length > 40
+    ) {
+      return res.status(400).json({ error: "Valid firstName, lastName, phone, and email are required." });
     }
 
     let socialsParsed = [];
@@ -383,7 +394,7 @@ export async function applyVolunteer(req, res, next) {
       socialsParsed = socials;
     }
 
-    const socialsNormalized = {};
+    const socialsNormalized = Object.create(null);
 
     if (Array.isArray(socialsParsed)) {
       socialsParsed.forEach((entry) => {
@@ -391,11 +402,11 @@ export async function applyVolunteer(req, res, next) {
 
         const [platform, handle] = entry.split(/[:=]/).map((s) => s.trim());
 
-        if (platform && handle) socialsNormalized[platform.toLowerCase()] = handle;
+        if (/^[a-z0-9_-]{1,32}$/i.test(platform) && handle.length <= 200) socialsNormalized[platform.toLowerCase()] = handle;
       });
     } else if (socialsParsed && typeof socialsParsed === "object") {
       Object.entries(socialsParsed).forEach(([platform, handle]) => {
-        if (platform && handle) socialsNormalized[platform.toLowerCase()] = String(handle).trim();
+        if (/^[a-z0-9_-]{1,32}$/i.test(platform) && typeof handle === "string" && handle.length <= 200) socialsNormalized[platform.toLowerCase()] = handle.trim();
       });
     }
 
@@ -406,6 +417,7 @@ export async function applyVolunteer(req, res, next) {
     let resumeUrl = null;
 
     if (req.file) {
+      if (!bucket) return res.status(503).json({ error: "Resume uploads are not configured", code: "STORAGE_UNAVAILABLE" });
       const ext = mime.getExtension(req.file.mimetype) || "bin";
       const fileName = `volunteers/${docRef.id}/resume.${ext}`;
       const file = bucket.file(fileName);
@@ -413,7 +425,7 @@ export async function applyVolunteer(req, res, next) {
       await file.save(req.file.buffer, {
         contentType: req.file.mimetype,
         resumable: false,
-        metadata: { cacheControl: "private, max-age=0, no-transform" },
+        metadata: { cacheControl: "private, max-age=0, no-transform", contentDisposition: "attachment" },
       });
 
       const [signedUrl] = await file.getSignedUrl({

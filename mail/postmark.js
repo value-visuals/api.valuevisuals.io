@@ -1,5 +1,11 @@
 import { ServerClient } from "postmark";
 
+// Public volunteer fields can contain markup. Never interpolate them raw into HTML emails.
+const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+})[char]);
+const cleanSubject = value => String(value ?? "").replace(/[\r\n]/g, " ").slice(0, 150);
+
 let _client = null;
 function getClient() {
   const token = process.env.POSTMARK_TOKEN;
@@ -65,11 +71,11 @@ export async function sendVolunteerApplicationReceipt({ to, firstName, jobTitle,
   return client.sendEmail({
     From: process.env.FROM_EMAIL,
     To: to,
-    Subject: `We received your application for ${safeTitle}${safeId}`,
+    Subject: `We received your application for ${cleanSubject(safeTitle)}${cleanSubject(safeId)}`,
     HtmlBody: `
       <div style="font-family: Arial, sans-serif; color:#333; line-height:1.5;">
-        <h2 style="margin:0 0 12px;">Thank you ${firstName || ""}!</h2>
-        <p>We appreciate your interest in <strong>${safeTitle}${safeId}</strong> at Value Visuals.</p>
+        <h2 style="margin:0 0 12px;">Thank you ${escapeHtml(firstName)}!</h2>
+        <p>We appreciate your interest in <strong>${escapeHtml(safeTitle)}${escapeHtml(safeId)}</strong> at Value Visuals.</p>
         <p>
           Our team will carefully review your application and reach out if there’s a fit. 
           In the meantime, stay connected and learn more about what we’re building:
@@ -113,25 +119,25 @@ export async function notifyAdminOfVolunteer({ applicant, jobTitle, jobId }) {
   } = applicant;
 
   const socialLines = Object.entries(socials || {})
-    .map(([k, v]) => `<li><strong>${k}</strong>: ${v}</li>`)
+    .map(([k, v]) => `<li><strong>${escapeHtml(k)}</strong>: ${escapeHtml(v)}</li>`)
     .join("") || "<li><em>None provided</em></li>";
 
   return client.sendEmail({
     From: process.env.FROM_EMAIL,
     To: "info@valuevisuals.io",
-    Subject: `New Application: ${safeTitle} (${safeId})`,
+    Subject: `New Application: ${cleanSubject(safeTitle)} (${cleanSubject(safeId)})`,
     HtmlBody: `
       <div style="font-family: Arial, sans-serif; color:#333; line-height:1.5;">
         <h2 style="margin:0 0 12px;">New Application Received</h2>
-        <p><strong>Position:</strong> ${safeTitle} (${safeId})</p>
-        <p><strong>Applicant ID:</strong> ${id}</p>
+        <p><strong>Position:</strong> ${escapeHtml(safeTitle)} (${escapeHtml(safeId)})</p>
+        <p><strong>Applicant ID:</strong> ${escapeHtml(id)}</p>
         <h3 style="margin:16px 0 8px;">Applicant Details</h3>
         <ul>
-          <li><strong>Name:</strong> ${[firstName, middleName, lastName].filter(Boolean).join(" ")}</li>
-          <li><strong>Email:</strong> ${email}</li>
-          <li><strong>Phone:</strong> ${phone}</li>
-          <li><strong>Resume:</strong> ${resumeUrl ? `<a href="${resumeUrl}">View resume</a>` : "Not uploaded"}</li>
-          <li><strong>Submitted At:</strong> ${createdAt || "Server Timestamp"}</li>
+          <li><strong>Name:</strong> ${escapeHtml([firstName, middleName, lastName].filter(Boolean).join(" "))}</li>
+          <li><strong>Email:</strong> ${escapeHtml(email)}</li>
+          <li><strong>Phone:</strong> ${escapeHtml(phone)}</li>
+          <li><strong>Resume:</strong> ${resumeUrl ? `<a href="${escapeHtml(resumeUrl)}">View resume</a>` : "Not uploaded"}</li>
+          <li><strong>Submitted At:</strong> ${escapeHtml(createdAt || "Server Timestamp")}</li>
         </ul>
         <h3 style="margin:16px 0 8px;">Social Profiles</h3>
         <ul>${socialLines}</ul>
