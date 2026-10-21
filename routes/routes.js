@@ -6,6 +6,7 @@ import * as c from "../controllers/core.controller.js";
 import * as crypto from "../controllers/crypto.controller.js";
 import * as metals from "../controllers/metals.controller.js";
 import * as market from "../controllers/market.controller.js";
+import { getAssetMarketCaps } from "../controllers/assetmarketcap.controller.js";
 import * as wallets from "../controllers/user.portfolio.controller.js";
 import { getPortfolioSummary, getPortfolioChart } from "../controllers/portfolio.btc.data.controller.js";
 import { getPortfolioSummary as getEthSummary, getPortfolioChart as getEthChart } from "../controllers/portfolio.eth.data.controller.js";
@@ -49,6 +50,9 @@ router.get("/market/overview", marketLimiter, publicCache, market.getOverview);
 router.get("/market/cap/chart", marketLimiter, publicCache, market.getMarketCapChart);
 // Admin-only: verify warmup, refresh and TTL on this exact API process.
 router.get("/market/cache-status", ...privateApi, requireAdmin, market.getCacheStatus);
+
+// AssetMarketCap: public rankings served from backend cache.
+router.get("/market/caps", marketLimiter, publicCache, getAssetMarketCaps);
 
 router.get("/polymarket/bitcoin", polymarketLimiter, getPolymarketBitcoin);
 router.get("/polymarket/ethereum", polymarketLimiter, getPolymarketEthereum);

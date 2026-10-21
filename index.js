@@ -10,6 +10,7 @@ import { preloadCryptoMarketData } from "./services/crypto-market-cache.js";
 import { preloadMetalsMarketData } from "./services/metals-market-cache.js";
 import { getUsdToFiatRate } from "./services/metals-fx.js";
 import { warmMarketCaches } from "./services/market-cache-warmup.js";
+import { preloadAssetMarketCap } from "./services/assetmarketcap-market-cache.js";
 
 const app = express();
 const PORT = Number(process.env.PORT || 5015);
@@ -55,6 +56,13 @@ const server = app.listen(PORT, () => {
     preloadMetals: preloadMetalsMarketData,
     getRate: getUsdToFiatRate,
   }).catch(error => console.error("[market-cache] Unexpected warmup error:", error));
+
+  // Preload AssetMarketCap rankings from Firestore into the backend cache.
+  void preloadAssetMarketCap()
+    .then(loaded => console.log(loaded
+      ? "[assetmarketcap-cache] Initial ranking cache preload complete"
+      : "[assetmarketcap-cache] Initial ranking cache preload unavailable; scheduled refresh will retry"))
+    .catch(error => console.error("[assetmarketcap-cache] Initial ranking cache preload failed:", error));
 });
 
 server.requestTimeout = 30_000;
