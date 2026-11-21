@@ -9,9 +9,7 @@
 //   ETHERSCAN_API_BASE       (optional, default: https://api.etherscan.io/v2/api)
 //   ETHERSCAN_CHAIN_ID       (optional, default: 1 for mainnet)
 
-import admin from "firebase-admin";
-
-const db = admin.firestore();
+import { db } from "../config/firebase.js";
 
 // ====== Config (Etherscan V2) ======
 const ETHERSCAN_BASE  = process.env.ETHERSCAN_API_BASE || "https://api.etherscan.io/v2/api";
