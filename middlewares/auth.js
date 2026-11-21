@@ -1,11 +1,11 @@
-import { admin } from "../config/firebase.js";
+import { auth } from "../config/firebase.js";
 
 export async function requireAuth(req, res, next) {
   try {
     const match = /^Bearer ([^\s]+)$/i.exec(req.headers.authorization ?? "");
     if (!match) return res.status(401).json({ error: "Missing bearer token", code: "AUTH_REQUIRED" });
     // Check revocation on private requests. Public endpoints never incur an auth lookup.
-    req.user = await admin.auth().verifyIdToken(match[1], true);
+    req.user = await auth.verifyIdToken(match[1], true);
     return next();
   } catch (error) {
     const codes = {

@@ -1,7 +1,7 @@
 // controllers/user.portfolio.controller.js
-import admin from "firebase-admin";
-const db = admin.firestore();
 import { randomUUID } from "crypto";
+import { db } from "../config/firebase.js";
+import { Timestamp } from "firebase-admin/firestore";
 
 const ALLOWED_METALS = new Set(["gold", "silver"]);
 const ALLOWED_UNITS = new Set(["g", "oz", "lb"]);
@@ -65,7 +65,7 @@ export async function saveUserWallet(req, res, next) {
     }
 
     const chainKey = chainRaw === "btc" ? "bitcoin" : "ethereum";
-    const now = admin.firestore.Timestamp.now(); // ✅ allowed inside arrays
+    const now = Timestamp.now(); // ✅ allowed inside arrays
     const nowMs = Date.now();
 
     const userRef = db.collection("users").doc(userId);
@@ -215,7 +215,7 @@ export async function updateUserWallet(req, res, next) {
 
     const chainKey = chainRaw === "btc" ? "bitcoin" : "ethereum";
     const userRef = db.collection("users").doc(userId);
-    const now = admin.firestore.Timestamp.now();
+    const now = Timestamp.now();
     const nowMs = Date.now();
 
     const result = await db.runTransaction(async (tx) => {
@@ -299,7 +299,7 @@ export async function savePreciousHolding(req, res, next) {
       return res.status(400).json({ error: "amount must be a positive number" });
     }
 
-    const now = admin.firestore.Timestamp.now();
+    const now = Timestamp.now();
     const nowMs = Date.now();
     const id = randomUUID();
 
@@ -460,7 +460,7 @@ export async function updatePreciousHolding(req, res, next) {
       return res.status(400).json({ error: "Provide at least one of name, amount, or unit to update" });
     }
 
-    const now = admin.firestore.Timestamp.now();
+    const now = Timestamp.now();
     const nowMs = Date.now();
 
     const userRef = db.collection("users").doc(userId);

@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import mime from "mime";
-import { admin, db, bucket } from "../config/firebase.js";
+import { FieldValue } from "firebase-admin/firestore";
+import { auth, db, bucket } from "../config/firebase.js";
 import { sendWelcomeEmail, sendVolunteerApplicationReceipt, notifyAdminOfVolunteer } from "../mail/postmark.js";
 
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
@@ -28,7 +29,7 @@ export async function signup(req, res, next) {
     const normalizedEmail = String(email).trim().toLowerCase();
     const normalizedInterests = normalizeInterests(interests);
 
-    const userRecord = await admin.auth().createUser({
+    const userRecord = await auth.createUser({
       email: normalizedEmail,
       password,
       displayName: typeof displayName === "string" ? displayName.trim().slice(0, 100) : undefined,
@@ -40,14 +41,14 @@ export async function signup(req, res, next) {
       {
         email: userRecord.email,
         displayName: userRecord.displayName || null,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
         role: "user",
         interests: normalizedInterests,
       },
       { merge: true }
     );
 
-    const customToken = await admin.auth().createCustomToken(userRecord.uid);
+    const customToken = await auth.createCustomToken(userRecord.uid);
 
     return res.status(201).json({
       uid: userRecord.uid,
@@ -114,17 +115,17 @@ export async function signout(req, res, next) {
       });
     }
 
-    const decoded = await admin.auth().verifyIdToken(
+    const decoded = await auth.verifyIdToken(
       token,
       true
     );
 
-    await admin.auth().revokeRefreshTokens(decoded.uid);
+    await auth.revokeRefreshTokens(decoded.uid);
 
     await db.collection("users").doc(decoded.uid).set(
       {
         lastSignoutAt:
-          admin.firestore.FieldValue.serverTimestamp(),
+          FieldValue.serverTimestamp(),
       },
       {
         merge: true,
@@ -216,7 +217,7 @@ export async function updateInterests(req, res, next) {
     await db.collection("users").doc(uid).set(
       {
         interests,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
     );
@@ -238,7 +239,7 @@ export async function mirrorAuthedEmail(req, res, next) {
     await db.collection("users").doc(uid).set(
       {
         email: String(email).toLowerCase(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       },
       { merge: true }
     );
@@ -269,7 +270,7 @@ export async function subscribe(req, res, next) {
     await subscriberRef.set(
       {
         email: normalized,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
         subscribed: true,
       },
       { merge: true }
@@ -333,7 +334,7 @@ export async function addCareers(req, res, next) {
 
       batch.set(docRef, {
         ...job,
-        postedAt: job.postedAt || admin.firestore.FieldValue.serverTimestamp(),
+        postedAt: job.postedAt || FieldValue.serverTimestamp(),
         active: job.active !== undefined ? job.active : true,
       });
     });
@@ -412,7 +413,7 @@ export async function applyVolunteer(req, res, next) {
 
     const jobTitle = await resolveJobTitle(jobId, jtRaw);
     const docRef = db.collection("volunteers").doc();
-    const createdAt = admin.firestore.FieldValue.serverTimestamp();
+    const createdAt = FieldValue.serverTimestamp();
 
     let resumeUrl = null;
 

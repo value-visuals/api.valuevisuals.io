@@ -1,6 +1,6 @@
 {
   "name": "value-visuals-api",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Value Visuals API",
   "type": "module",
   "main": "index.js",
@@ -13,29 +13,32 @@
     "check": "npm run lint && npm run knip"
   },
   "dependencies": {
-    "axios": "^1.19.0",
-    "compression": "^1.7.4",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.4.0",
-    "firebase-admin": "^13.5.0",
-    "helmet": "^7.1.0",
-    "mime": "^4.1.0",
-    "morgan": "^1.10.0",
-    "multer": "^2.0.2",
+    "axios": "1.21.1",
+    "compression": "1.8.2",
+    "cors": "2.8.6",
+    "dotenv": "18.0.10",
+    "express": "5.3.0",
+    "express-rate-limit": "8.7.5",
+    "firebase-admin": "14.5.1",
+    "helmet": "8.3.0",
+    "mime": "4.1.2",
+    "morgan": "1.12.1",
+    "multer": "2.5.0",
     "node-fetch": "^3.3.2",
-    "postmark": "^4.0.5"
+    "postmark": "5.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.8.1",
-    "globals": "^17.11.0",
-    "knip": "^6.32.2",
-    "nodemon": "^3.1.0"
+    "eslint": "10.15.0",
+    "globals": "17.14.0",
+    "knip": "6.47.0",
+    "nodemon": "3.1.14"
   },
   "overrides": {
     "whatwg-url": "^14.0.0",
-    "tr46": "^5.0.0"
+    "tr46": "^5.0.0",
+    "nodemon": {
+      "minimatch": "11.0.9"
+    }
   }
 }

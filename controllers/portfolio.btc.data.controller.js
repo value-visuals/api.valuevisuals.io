@@ -1,7 +1,5 @@
 // controllers/portfolio.data.controller.js
-import admin from "firebase-admin";
-
-const db = admin.firestore();
+import { db } from "../config/firebase.js";
 
 const MEMPOOL_BASE = process.env.ENTERPRISE_MEMPOOL_API_BASE || "https://enterprise.blockstream.info/api";
 const CLIENT_ID = process.env.BLOCKSTREAM_CLIENT_ID;
